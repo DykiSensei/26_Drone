@@ -1,0 +1,8 @@
+# ESP-IDF sdkconfig defaults — portable across machines
+# Run "idf.py set-target esp32s3" on new machines before building
+
+# WebSocket support (required for drone control)
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# Partition table: single application (no OTA)
+CONFIG_PARTITION_TABLE_SINGLE_APP=y

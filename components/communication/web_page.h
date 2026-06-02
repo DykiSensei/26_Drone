@@ -1,0 +1,201 @@
+#pragma once
+
+/* Embedded single-page web frontend for drone control & telemetry */
+#define WEB_PAGE_HTML \
+"<!DOCTYPE html>\n" \
+"<html lang=\"zh\">\n" \
+"<head>\n" \
+"<meta charset=\"UTF-8\">\n" \
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,user-scalable=no\">\n" \
+"<title>Drone Control</title>\n" \
+"<style>\n" \
+"*{margin:0;padding:0;box-sizing:border-box}\n" \
+"body{background:#0f1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow-x:hidden;touch-action:manipulation}\n" \
+".top-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d}\n" \
+".top-bar .title{font-size:16px;font-weight:700;color:#58a6ff}\n" \
+".top-bar .status{font-size:12px}\n" \
+".status-ok{color:#3fb950} .status-err{color:#f85149}\n" \
+".battery{font-size:12px;color:#d2991d}\n" \
+".container{display:flex;flex-wrap:wrap;gap:8px;padding:8px;max-width:800px;margin:0 auto}\n" \
+".panel{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 10px}\n" \
+".panel h3{font-size:12px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:1px}\n" \
+".data-row{display:flex;justify-content:space-between;font-size:13px;padding:1px 0}\n" \
+".data-row span:last-child{font-family:monospace;color:#7ee787}\n" \
+".sensors{flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px}\n" \
+".controls{flex:1;min-width:280px;display:flex;flex-direction:column;gap:8px;align-items:center}\n" \
+".joy-area{display:flex;gap:16px;align-items:center}\n" \
+".joy-box{text-align:center}\n" \
+".joy-box label{font-size:11px;color:#8b949e}\n" \
+"canvas{border:1px solid #30363d;border-radius:50%;background:#21262d;touch-action:none}\n" \
+".yaw-box{display:flex;flex-direction:column;align-items:center;gap:4px}\n" \
+".yaw-box label{font-size:11px;color:#8b949e}\n" \
+"#yaw-slider,#throttle-slider{-webkit-appearance:none;height:6px;border-radius:3px;background:#30363d;outline:none}\n" \
+"#yaw-slider{width:200px}\n" \
+"#throttle-slider{width:140px;margin-top:60px}\n" \
+"#yaw-slider::-webkit-slider-thumb,#throttle-slider::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:#58a6ff;cursor:pointer}\n" \
+".mode-row{display:flex;gap:6px;align-items:center;margin-top:4px}\n" \
+".mode-row label{font-size:12px;color:#8b949e}\n" \
+".mode-row select{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:13px}\n" \
+".disarmed{color:#f85149!important;font-weight:700}\n" \
+"button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer}\n" \
+"button:active{opacity:0.7}\n" \
+".toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#238636;color:#fff;padding:10px 24px;border-radius:8px;font-size:14px;z-index:999;pointer-events:none;opacity:0;transition:opacity 0.3s}\n" \
+".toast.show{opacity:1}\n" \
+".toast.warn{background:#d2991d}\n" \
+".trim-val{font-size:11px;color:#8b949e;margin-left:4px}\n" \
+".btn-danger{background:#3a1c1c;border-color:#f85149;color:#f85149}\n" \
+".btn-danger:disabled{opacity:0.4}\n" \
+".mode-btns{display:flex;gap:4px;flex-wrap:wrap;justify-content:center;margin-top:4px}\n" \
+".mode-btn{flex:1;min-width:60px;padding:6px 4px;font-size:12px;border:1px solid #30363d;background:#21262d;color:#8b949e;border-radius:4px;cursor:pointer}\n" \
+".mode-btn.active{background:#238636;color:#fff;border-color:#238636}\n" \
+".mode-btn.disarm-btn.active{background:#f85149;border-color:#f85149}\n" \
+".dpad{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;width:120px;margin:8px auto}\n" \
+".dpad-btn{padding:8px;font-size:18px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;cursor:pointer;-webkit-user-select:none;user-select:none}\n" \
+".dpad-btn:active{background:#30363d}\n" \
+".dpad-empty{visibility:hidden}\n" \
+"</style>\n" \
+"</head>\n" \
+"<body>\n" \
+"<div id=\"toast\" class=\"toast\"></div>\n" \
+"<div class=\"top-bar\">\n" \
+"<span class=\"title\">Drone</span>\n" \
+"<span id=\"conn-status\" class=\"status status-err\">Disconnected</span>\n" \
+"<span id=\"mode-display\" class=\"disarmed\">DISARMED</span>\n" \
+"<span id=\"battery\" class=\"battery\">--.-V</span>\n" \
+"</div>\n" \
+"<div class=\"container\">\n" \
+"<div class=\"sensors\">\n" \
+"<div class=\"panel\"><h3>Attitude <span class=\"trim-val\">Trim:<span id=\"trim-roll\">0.0</span>/<span id=\"trim-pitch\">0.0</span>°</span></h3>\n" \
+"<div class=\"data-row\"><span>Roll</span><span id=\"att-roll\">0.0°</span></div>\n" \
+"<div class=\"data-row\"><span>Pitch</span><span id=\"att-pitch\">0.0°</span></div>\n" \
+"<div class=\"data-row\"><span>Yaw</span><span id=\"att-yaw\">0.0°</span></div>\n" \
+"</div>\n" \
+"<div class=\"panel\"><h3>IMU Raw</h3>\n" \
+"<div class=\"data-row\"><span>Accel X/Y/Z</span><span id=\"accel\">--</span></div>\n" \
+"<div class=\"data-row\"><span>Gyro X/Y/Z</span><span id=\"gyro\">--</span></div>\n" \
+"</div>\n" \
+"<div class=\"panel\"><h3>PID Output</h3>\n" \
+"<div class=\"data-row\"><span>Roll / Pitch / Yaw</span><span id=\"pid-out\">0.000 / 0.000 / 0.000</span></div>\n" \
+"</div>\n" \
+"<div class=\"panel\"><h3>TOF Altitude</h3>\n" \
+"<div class=\"data-row\"><span>Distance</span><span id=\"tof-val\">-- mm</span></div>\n" \
+"</div>\n" \
+"<div class=\"panel\"><h3>Optical Flow Position</h3>\n" \
+"<div class=\"data-row\"><span>X</span><span id=\"flow-x\">0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Y</span><span id=\"flow-y\">0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Qual</span><span id=\"flow-qual\">0</span></div>\n" \
+"</div>\n" \
+"</div>\n" \
+"<div class=\"controls\">\n" \
+"<div class=\"joy-area\">\n" \
+"<div class=\"joy-box\">\n" \
+"<label>Throttle <span id=\"throttle-val\">0%</span></label><br>\n" \
+"<input type=\"range\" id=\"throttle-slider\" min=\"0\" max=\"1\" step=\"0.01\" value=\"0\">\n" \
+"</div>\n" \
+"<div class=\"joy-box\">\n" \
+"<label>Roll / Pitch</label><br>\n" \
+"<canvas id=\"joy-rp\" width=\"140\" height=\"140\"></canvas>\n" \
+"</div>\n" \
+"</div>\n" \
+"<div class=\"yaw-box\">\n" \
+"<label>Yaw <span id=\"yaw-val\">0.00</span></label>\n" \
+"<input type=\"range\" id=\"yaw-slider\" min=\"-1\" max=\"1\" step=\"0.01\" value=\"0\">\n" \
+"</div>\n" \
+"<div class=\"mode-btns\">\n" \
+"<button class=\"mode-btn disarm-btn active\" data-mode=\"disarmed\">锁定</button>\n" \
+"<button class=\"mode-btn\" data-mode=\"stabilize\">自稳</button>\n" \
+"<button class=\"mode-btn\" data-mode=\"alt_hold\">定高</button>\n" \
+"<button class=\"mode-btn\" data-mode=\"pos_hold\">悬停</button>\n" \
+"</div>\n" \
+"<div class=\"dpad\" id=\"dpad\">\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"dpad-btn\" onmousedown=\"pitch=0.5\" onmouseup=\"pitch=0\" ontouchstart=\"pitch=0.5\" ontouchend=\"pitch=0\">▲</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"dpad-btn\" onmousedown=\"roll=-0.5\" onmouseup=\"roll=0\" ontouchstart=\"roll=-0.5\" ontouchend=\"roll=0\">◀</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"dpad-btn\" onmousedown=\"roll=0.5\" onmouseup=\"roll=0\" ontouchstart=\"roll=0.5\" ontouchend=\"roll=0\">▶</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"dpad-btn\" onmousedown=\"pitch=-0.5\" onmouseup=\"pitch=0\" ontouchstart=\"pitch=-0.5\" ontouchend=\"pitch=0\">▼</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"</div>\n" \
+"<div style=\"display:flex;justify-content:center;margin-top:6px;gap:8px\">\n" \
+"<button onclick=\"sendCmd('gyro_calib')\" ontouchstart=\"event.preventDefault();sendCmd('gyro_calib')\">陀螺仪校准</button>\n" \
+"<button onclick=\"sendCmd('level_trim')\" ontouchstart=\"event.preventDefault();sendCmd('level_trim')\">水平校准</button>\n" \
+"<button onclick=\"sendCmd('reset_trim')\" ontouchstart=\"event.preventDefault();sendCmd('reset_trim')\">重置水平</button>\n" \
+"</div>\n" \
+"<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
+"<h3>Motor Trim <span style=\"font-size:10px;color:#8b949e\">(补偿硬件差异)</span></h3>\n" \
+"<div style=\"display:flex;justify-content:space-between;gap:4px;margin-top:4px\">\n" \
+"<div style=\"text-align:center\"><div style=\"font-size:11px;color:#8b949e\">M1(FR)</div><div><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(0,0.01)\">+</button><span id=\"mtrim-0\" style=\"font-family:monospace;font-size:12px;margin:0 4px\">0.00</span><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(0,-0.01)\">-</button></div><button style=\"margin-top:2px;font-size:10px;padding:2px 6px;background:#3a1c1c;border-color:#f85149;color:#f85149\" onclick=\"calibMotor(0)\">校准</button></div>\n" \
+"<div style=\"text-align:center\"><div style=\"font-size:11px;color:#8b949e\">M2(FL)</div><div><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(1,0.01)\">+</button><span id=\"mtrim-1\" style=\"font-family:monospace;font-size:12px;margin:0 4px\">0.00</span><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(1,-0.01)\">-</button></div><button style=\"margin-top:2px;font-size:10px;padding:2px 6px;background:#3a1c1c;border-color:#f85149;color:#f85149\" onclick=\"calibMotor(1)\">校准</button></div>\n" \
+"<div style=\"text-align:center\"><div style=\"font-size:11px;color:#8b949e\">M3(RL)</div><div><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(2,0.01)\">+</button><span id=\"mtrim-2\" style=\"font-family:monospace;font-size:12px;margin:0 4px\">0.00</span><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(2,-0.01)\">-</button></div><button style=\"margin-top:2px;font-size:10px;padding:2px 6px;background:#3a1c1c;border-color:#f85149;color:#f85149\" onclick=\"calibMotor(2)\">校准</button></div>\n" \
+"<div style=\"text-align:center\"><div style=\"font-size:11px;color:#8b949e\">M4(RR)</div><div><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(3,0.01)\">+</button><span id=\"mtrim-3\" style=\"font-family:monospace;font-size:12px;margin:0 4px\">0.00</span><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(3,-0.01)\">-</button></div><button style=\"margin-top:2px;font-size:10px;padding:2px 6px;background:#3a1c1c;border-color:#f85149;color:#f85149\" onclick=\"calibMotor(3)\">校准</button></div>\n" \
+"</div>\n" \
+"</div>\n" \
+"<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
+"<h3>Motor PWM</h3>\n" \
+"<div style=\"display:flex;justify-content:space-between;font-size:12px;font-family:monospace;color:#7ee787\">\n" \
+"<span>M1:<span id=\"mot-0\">0</span>%</span><span>M2:<span id=\"mot-1\">0</span>%</span><span>M3:<span id=\"mot-2\">0</span>%</span><span>M4:<span id=\"mot-3\">0</span>%</span>\n" \
+"</div>\n" \
+"<div style=\"display:flex;gap:4px;margin-top:6px\">\n" \
+"<button onclick=\"allPWM(2000)\">All MAX</button>\n" \
+"<button onclick=\"allPWM(1000)\">All MIN</button>\n" \
+"<button class=\"btn-danger\" onclick=\"allPWM(1000);motorPWM=[1000,1000,1000,1000]\">STOP</button>\n" \
+"</div>\n" \
+"</div>\n" \
+"</div>\n" \
+"</div>\n" \
+"<script>\n" \
+"const wsUrl='ws://'+location.host+'/ws';\n" \
+"let ws,throttle=0,roll=0,pitch=0,yaw=0,mode='disarmed',connected=false;\n" \
+"function $(id){return document.getElementById(id)}\n" \
+"function setStatus(ok,text){const e=$('conn-status');e.textContent=text||(ok?'Connected':'Disconnected');e.className='status '+(ok?'status-ok':'status-err')}\n" \
+"let motorPWM=[1000,1000,1000,1000];\n" \
+"function allPWM(val){for(let i=0;i<4;i++){motorPWM[i]=val;let e=$('mot-'+i);if(e)e.textContent=Math.round((val-1000)/10)}}\n" \
+"function connect(){\n" \
+"ws=new WebSocket(wsUrl);\n" \
+"ws.onopen=function(){connected=true;setStatus(true)}\n" \
+"ws.onclose=function(){connected=false;setStatus(false);setTimeout(connect,2000)}\n" \
+"ws.onerror=function(){ws.close()}\n" \
+"ws.onmessage=function(e){\n" \
+"try{let d=JSON.parse(e.data);\n" \
+"if(d.attitude){$('att-roll').textContent=d.attitude.roll.toFixed(1)+'°';$('att-pitch').textContent=d.attitude.pitch.toFixed(1)+'°';$('att-yaw').textContent=d.attitude.yaw.toFixed(1)+'°'}\n" \
+"if(d.accel){$('accel').textContent=d.accel.map(v=>v.toFixed(2)).join(' / ')}\n" \
+"if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
+"if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual}\n" \
+"if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
+"if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
+"if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \
+"if(d.trim){$('trim-roll').textContent=d.trim.roll.toFixed(1)+'°';$('trim-pitch').textContent=d.trim.pitch.toFixed(1)+'°'}\n" \
+"if(d.pid){$('pid-out').textContent=d.pid.map(v=>v.toFixed(3)).join(' / ')}\n" \
+"if(d.mtrim){for(let i=0;i<4;i++){let e=$('mtrim-'+i);if(e)e.textContent=d.mtrim[i].toFixed(2)}}\n" \
+"}catch(ex){}\n" \
+"}\n" \
+"}connect();\n" \
+"let motorTrim=[0,0,0,0];\n" \
+"function sendStick(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
+"function send(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,mode,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
+"let toastTimer=null;function showToast(msg,warn){let t=$('toast');t.textContent=msg;t.className='toast'+(warn?' warn':'')+' show';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},1500)}\n" \
+"function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));showToast(c==='gyro_calib'?'Gyro calibrating... (1s)':c==='level_trim'?'Level trim captured':c==='reset_trim'?'Trim reset to zero':'')}}\n" \
+"function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
+"function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
+"setInterval(sendStick,50);\n" \
+"/* Joysticks */\n" \
+"function joy(canvasId,onMove){\n" \
+"let c=$(canvasId),ctx=c.getContext('2d'),r=c.width/2,cx=0,cy=0,active=false;\n" \
+"function draw(){ctx.clearRect(0,0,c.width,c.height);ctx.beginPath();ctx.arc(r,r,r-4,0,2*Math.PI);ctx.strokeStyle='#30363d';ctx.lineWidth=2;ctx.stroke();ctx.beginPath();ctx.arc(r+cx,r+cy,18,0,2*Math.PI);ctx.fillStyle=active?'#58a6ff88':'#58a6ff33';ctx.fill()}\n" \
+"function getPos(e){let rect=c.getBoundingClientRect();let t=e.touches?e.touches[0]:e;return{x:t.clientX-rect.left-r,y:t.clientY-rect.top-r}}\n" \
+"c.addEventListener('touchstart',function(e){e.preventDefault();active=true;let p=getPos(e);cx=Math.max(-r+20,Math.min(r-20,p.x));cy=Math.max(-r+20,Math.min(r-20,p.y));draw();onMove(cx/(r-20),-cy/(r-20))})\n" \
+"c.addEventListener('touchmove',function(e){e.preventDefault();if(!active)return;let p=getPos(e);cx=Math.max(-r+20,Math.min(r-20,p.x));cy=Math.max(-r+20,Math.min(r-20,p.y));draw();onMove(cx/(r-20),-cy/(r-20))})\n" \
+"c.addEventListener('touchend',function(e){e.preventDefault();active=false;cx=0;cy=0;draw();onMove(0,0)})\n" \
+"draw()\n" \
+"}\n" \
+"$('throttle-slider').addEventListener('input',function(){throttle=parseFloat(this.value);$('throttle-val').textContent=(throttle*100).toFixed(0)+'%'});\n" \
+"joy('joy-rp',function(x,y){roll=x;pitch=y});\n" \
+"$('yaw-slider').addEventListener('input',function(){yaw=parseFloat(this.value);$('yaw-val').textContent=yaw.toFixed(2)});\n" \
+"function setMode(m){mode=m;let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let idx=t[m];if(idx!=null)btns[idx].classList.add('active');send()}\n" \
+"document.querySelectorAll('.mode-btn').forEach(function(b){b.addEventListener('click',function(){setMode(this.dataset.mode)});b.addEventListener('touchstart',function(e){e.preventDefault();setMode(this.dataset.mode)})});\n" \
+"</script>\n" \
+"</body>\n" \
+"</html>"
