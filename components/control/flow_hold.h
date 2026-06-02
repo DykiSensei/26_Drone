@@ -1,0 +1,29 @@
+#pragma once
+
+#include "pid.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    pid_t   pid_vx;          /* 体轴 X 速度 → pitch 修正角 (deg) */
+    pid_t   pid_vy;          /* 体轴 Y 速度 → roll 修正角 (deg) */
+    float   out_pitch_deg;   /* 最新 pitch 修正角 */
+    float   out_roll_deg;    /* 最新 roll 修正角 */
+    float   quality_gain;    /* 光流质量 EMA 平滑值 0~1 */
+    int64_t last_update_us;  /* 上次 PID 更新的时间戳 */
+    bool    active;          /* 是否正在输出有效修正 */
+} flow_hold_t;
+
+void flow_hold_init(flow_hold_t *fh);
+void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
+                      uint8_t qual, float height_m);
+void flow_hold_reset(flow_hold_t *fh);
+bool flow_hold_is_active(const flow_hold_t *fh);
+
+#ifdef __cplusplus
+}
+#endif

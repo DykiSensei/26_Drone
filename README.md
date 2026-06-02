@@ -17,7 +17,7 @@
 | DISARMED | 电机锁定 |
 | STABILIZE | 自稳（角速度 + 角度串级 PID） |
 | ALT_HOLD | 定高（自稳 + TOF 高度 PID） |
-| POS_HOLD | 悬停（定高 + 光流，光流环未实现） |
+| POS_HOLD | 悬停（自稳 + 定高 + 光流速度保持） |
 
 ## 控制方式
 
@@ -32,3 +32,5 @@ idf.py flash monitor
 ```
 
 ESP-IDF 环境路径和串口号见 `.vscode/settings.json.shared`。
+
+详细架构、引脚分配和设计决策见 [DESIGN.md](DESIGN.md)。

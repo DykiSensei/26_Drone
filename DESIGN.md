@@ -89,8 +89,8 @@ Commander ─────────→│                 │────→ T
 MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
                           ↓
 Commander setpoint → 模式判断:
-  STABILIZE: 摇杆 → 目标倾角 (±30°) → 角度环 P → 目标角速率
-  其他模式:  摇杆 → 目标角速率 (±3 rad/s)
+  所有模式:  摇杆 → 目标倾角 (±30°) → + 光流修正 (±5°) → 角度环 P → 目标角速率
+  偏航:      摇杆 → 目标角速率 (±3 rad/s)
                           ↓
                     PID (rate) → 力矩输出
                           ↓
@@ -184,6 +184,28 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - `altitude_reset()`：清零积分（DISARMED 或低油门时调用）
 - 有效油门 = 摇杆基准 + 高度 PID 修正（钳位 0.0–1.0）
 
+### 3.3.2 光流速度保持控制器 `control/flow_hold.h`
+
+在 STABILIZE / ALT_HOLD / POS_HOLD 模式下叠加水平速度修正，主动抵抗漂移，实现垂直起飞。
+
+- `flow_hold_t`：封装两个速度 PID + 输出修正角
+- `flow_hold_init()`：初始化 PID（Kp=0.05, Ki=0.01, Kd=0.0，输出限幅 ±5°，积分限幅 2°）
+- `flow_hold_update(flow_x, flow_y, qual, height_m)`：有新光流数据时更新
+  - 质量门控：`qual > 100` 才有效
+  - 高度门控：0.04m < height < 3.0m
+  - 用 `esp_timer_get_time()` 计算真实 dt（光流帧率低于 100Hz）
+  - 质量不满足时修正指数衰减（×0.95）
+- `flow_hold_reset()`：DISARMED / 低油门时清零 PID 和输出
+- `flow_hold_is_active()`：`quality_gain > 0.01` 时返回 true
+- 修正叠加在摇杆目标角度上（±30° + ±5°），不影响飞行员操控权限
+- 速度环的积分项隐含位置保持效果（∫速度误差 = 位置误差）
+
+```
+光流 flow_x/flow_y (速度测量，setpoint=0)
+    → 速度 PID → 修正角 ±5°
+    → 叠加到 stick 目标角度 → Angle P → Rate PID → Mixer → 电机
+```
+
 未来扩展（Phase 3）：
 
 | 控制器 | 频率 | 输入 | 输出 |
@@ -191,7 +213,8 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 | 角度环 (P) | 1000Hz | roll/pitch/yaw 期望角 | 期望角速率 |
 | 角速率环 (PID) | 1000Hz | 期望角速率 - 实际角速率 | 力矩输出 |
 | 高度环 (PID) | 100Hz | 期望高度 - TOF距离 | 油门补偿 ✅ 已实现 |
-| 水平位置环 (PID) | 100Hz | 期望位置 - 光流积分 | 期望角度 |
+| 水平速度环 (PID) | 100Hz | 光流速度 (setpoint=0) | 姿态修正角 ✅ 已实现 |
+| 水平位置环 (PID) | 100Hz | 期望位置 - 光流积分 | 期望速度 |
 
 ### 3.4 混控器 `control/mixer.h`
 
@@ -243,7 +266,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
   "tof": 1234,
   "alt": {"target": 1.20, "out": 0.015},
-  "flow": {"x": 0.0, "y": 0.0, "qual": 0},
+  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0},
   "motor": [0.0, 0.0, 0.0, 0.0],
   "mtrim": [0.0, 0.0, 0.0, 0.0],
   "pid": [0.0, 0.0, 0.0],
@@ -315,7 +338,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 | **DISARMED** | 锁定，电机停止 | 电机停止，PID 积分清零 | — |
 | **STABILIZE** | 自稳模式（Angle + Rate） | 角度环 P + 角速率环 PID + 混控 | MPU6050 |
 | **ALT_HOLD** | 定高模式 | 自稳 + 高度环 PID（TOF 反馈），切入时自动捕获目标高度 | MPU6050 + TOF400F |
-| **POS_HOLD** | 定点悬停 | 目前等同于 STABILIZE（位置环待实现） | MPU6050 + TOF400F + PV3901L1 |
+| **POS_HOLD** | 定点悬停 | 自稳 + 光流速度保持 + 高度环，切入时重置光流积分 | MPU6050 + TOF400F + PV3901L1 |
 
 ### 3.9 系统管理
 
@@ -348,7 +371,8 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 │   │   ├── commander.h / .c    # 遥控指令解析 + setpoint 管理 ✅
 │   │   ├── pid.h / .c          # PID 控制器 ✅
 │   │   ├── mixer.h / .c        # X-quad 混控器 ✅
-│   │   └── altitude.h / .c     # 定高 PID 控制器 ✅
+│   │   ├── altitude.h / .c     # 定高 PID 控制器 ✅
+│   │   └── flow_hold.h / .c    # 光流速度保持控制器 ✅
 │   ├── communication/          # 通信
 │   │   ├── CMakeLists.txt
 │   │   ├── wifi_ap.h / .c      # WiFi AP 模式 ✅
@@ -385,7 +409,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 
 ### Phase 3：高级飞行模式
 - [x] 定高模式（TOF PID 高度环）
-- [ ] 光流定点悬停（位置环）
+- [x] 光流速度保持（速度环，所有模式生效）
 - [x] WiFi 遥控 + 遥测（WebSocket 已实现）
 - [ ] 失控保护 + 安全逻辑
 

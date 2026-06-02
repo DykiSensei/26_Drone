@@ -16,6 +16,7 @@
 #include "pid.h"
 #include "mixer.h"
 #include "altitude.h"
+#include "flow_hold.h"
 
 static const char *TAG = "main";
 
@@ -33,6 +34,7 @@ static float g_trim_pitch = 0.0f;
 static bool  g_capture_trim = false;
 
 static altitude_ctrl_t g_alt;            /* 定高 PID 控制器 */
+static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
 static flight_mode_t   g_prev_mode = MODE_DISARMED;
 
@@ -81,7 +83,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
         "\"alt\":{\"target\":%.2f,\"out\":%.3f},"
-        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u},"
+        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
@@ -94,6 +96,7 @@ static void build_telemetry(char *buf, size_t sz,
         tof_mm,
         g_alt.target_m, g_alt_out,
         flow->flow_x_i, flow->flow_y_i, flow->qual,
+        g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -138,6 +141,7 @@ void app_main(void)
     pid_init(&pid_pitch, 0.5f, 0.02f, 0.04f, 0.5f, 0.15f);
     pid_init(&pid_yaw,   0.8f, 0.05f, 0.00f, 0.5f, 0.15f);
     altitude_init(&g_alt);
+    flow_hold_init(&g_flow_hold);
 
     /* --- WiFi AP --- */
     if (wifi_ap_init() != 0) {
@@ -164,13 +168,19 @@ void app_main(void)
     while (1) {
         mpu6050_read(&imu);
         tof400f_get_distance(&tof_mm);
-        pv3901l1_get_data(&flow);
+        int flow_new = pv3901l1_get_data(&flow);
 
         /* Mahony AHRS fusion */
         attitude_update(imu.accel_x, imu.accel_y, imu.accel_z,
                         imu.gyro_x,  imu.gyro_y,  imu.gyro_z,
                         dt);
         attitude_get_euler(&roll, &pitch, &yaw);
+
+        /* 光流速度保持：有新数据时更新 */
+        if (flow_new == 0) {
+            flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
+                             flow.qual, tof_mm * 0.001f);
+        }
 
         /* 捕获水平修正量（必须在水平放置时触发） */
         if (g_capture_trim) {
@@ -199,6 +209,7 @@ void app_main(void)
             pid_reset(&pid_pitch);
             pid_reset(&pid_yaw);
             altitude_reset(&g_alt);
+            flow_hold_reset(&g_flow_hold);
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
             if (sp->throttle < 0.05f) {
@@ -208,8 +219,17 @@ void app_main(void)
                 pid_reset(&pid_pitch);
                 pid_reset(&pid_yaw);
                 altitude_reset(&g_alt);
+                flow_hold_reset(&g_flow_hold);
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
+
+            /* POS_HOLD 切入时重置光流积分 */
+            bool entering_poshold = (sp->mode == MODE_POS_HOLD)
+                                 && (g_prev_mode != MODE_POS_HOLD);
+            if (entering_poshold) {
+                pv3901l1_reset_integral();
+                ESP_LOGW(TAG, "POS_HOLD: flow integral reset");
+            }
 
             /* --- 定高：模式切入时捕获当前高度为目标 --- */
             bool entering_alt = alt_mode
@@ -233,6 +253,12 @@ void app_main(void)
                 /* 角度外环：摇杆映射到目标倾角，再换算为目标角速度 */
                 float target_roll_angle  = sp->roll  * MAX_ANGLE_DEG;
                 float target_pitch_angle = sp->pitch * MAX_ANGLE_DEG;
+
+                /* 光流漂移修正：叠加速度环输出 */
+                if (flow_hold_is_active(&g_flow_hold)) {
+                    target_roll_angle  += g_flow_hold.out_roll_deg;
+                    target_pitch_angle += g_flow_hold.out_pitch_deg;
+                }
 
                 /* 扣除水平修正量，补偿 MPU6050 安装偏移 */
                 float roll_err  = roll  - g_trim_roll;
