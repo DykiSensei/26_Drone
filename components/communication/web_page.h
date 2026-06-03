@@ -53,6 +53,11 @@
 ".dpad-btn{padding:8px;font-size:18px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;cursor:pointer;-webkit-user-select:none;user-select:none}\n" \
 ".dpad-btn:active{background:#30363d}\n" \
 ".dpad-empty{visibility:hidden}\n" \
+".move-cross{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;width:150px;margin:8px auto}\n" \
+".move-btn{padding:10px;font-size:20px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;-webkit-user-select:none;user-select:none;transition:background 0.1s}\n" \
+".move-btn:active{background:#1f6feb;color:#fff}\n" \
+".move-btn.pressed{background:#1f6feb;color:#fff;border-color:#58a6ff}\n" \
+".move-stop-btn{padding:8px;font-size:12px;background:#3a1c1c;border:1px solid #f85149;border-radius:6px;color:#f85149;cursor:pointer;font-weight:700}\n" \
 "</style>\n" \
 "</head>\n" \
 "<body>\n" \
@@ -123,6 +128,18 @@
 "<button onclick=\"sendCmd('level_trim')\" ontouchstart=\"event.preventDefault();sendCmd('level_trim')\">水平校准</button>\n" \
 "<button onclick=\"sendCmd('reset_trim')\" ontouchstart=\"event.preventDefault();sendCmd('reset_trim')\">重置水平</button>\n" \
 "</div>\n" \
+"<div style=\"text-align:center;margin-top:8px\"><label style=\"font-size:11px;color:#8b949e\">水平移动 (按住移动,松开停止)</label></div>\n" \
+"<div class=\"move-cross\" id=\"move-cross\">\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"move-btn\" id=\"move-fwd\">▲前</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"move-btn\" id=\"move-left\">◀左</button>\n" \
+"<button class=\"move-stop-btn\" id=\"move-stop\">STOP</button>\n" \
+"<button class=\"move-btn\" id=\"move-right\">▶右</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"<button class=\"move-btn\" id=\"move-back\">▼后</button>\n" \
+"<div class=\"dpad-empty\"></div>\n" \
+"</div>\n" \
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
 "<h3>Motor Trim <span style=\"font-size:10px;color:#8b949e\">(补偿硬件差异)</span></h3>\n" \
 "<div style=\"display:flex;justify-content:space-between;gap:4px;margin-top:4px\">\n" \
@@ -147,7 +164,7 @@
 "</div>\n" \
 "<script>\n" \
 "const wsUrl='ws://'+location.host+'/ws';\n" \
-"let ws,throttle=0,roll=0,pitch=0,yaw=0,mode='disarmed',connected=false;\n" \
+"let ws,throttle=0,roll=0,pitch=0,yaw=0,mode='disarmed',connected=false,vel_x=0,vel_y=0;\n" \
 "function $(id){return document.getElementById(id)}\n" \
 "function setStatus(ok,text){const e=$('conn-status');e.textContent=text||(ok?'Connected':'Disconnected');e.className='status '+(ok?'status-ok':'status-err')}\n" \
 "let motorPWM=[1000,1000,1000,1000];\n" \
@@ -174,10 +191,10 @@
 "}\n" \
 "}connect();\n" \
 "let motorTrim=[0,0,0,0];\n" \
-"function sendStick(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
-"function send(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,mode,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
+"function sendStick(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,vel_x,vel_y,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
+"function send(){if(connected&&ws){ws.send(JSON.stringify({throttle,roll,pitch,yaw,vel_x,vel_y,mode,motor:motorPWM.map(v=>(v-1000)/1000),mtrim:motorTrim}))}}\n" \
 "let toastTimer=null;function showToast(msg,warn){let t=$('toast');t.textContent=msg;t.className='toast'+(warn?' warn':'')+' show';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},1500)}\n" \
-"function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));showToast(c==='gyro_calib'?'Gyro calibrating... (1s)':c==='level_trim'?'Level trim captured':c==='reset_trim'?'Trim reset to zero':'')}}\n" \
+"function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
@@ -196,6 +213,16 @@
 "$('yaw-slider').addEventListener('input',function(){yaw=parseFloat(this.value);$('yaw-val').textContent=yaw.toFixed(2)});\n" \
 "function setMode(m){mode=m;let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let idx=t[m];if(idx!=null)btns[idx].classList.add('active');send()}\n" \
 "document.querySelectorAll('.mode-btn').forEach(function(b){b.addEventListener('click',function(){setMode(this.dataset.mode)});b.addEventListener('touchstart',function(e){e.preventDefault();setMode(this.dataset.mode)})});\n" \
+"/* 水平移动按钮 */\n" \
+"function startMove(dx,dy){vel_x=dx;vel_y=dy;var btns=document.querySelectorAll('.move-btn');for(var i=0;i<btns.length;i++)btns[i].classList.remove('pressed');if(dx===0&&dy>0)$('move-fwd').classList.add('pressed');if(dx===0&&dy<0)$('move-back').classList.add('pressed');if(dx<0&&dy===0)$('move-left').classList.add('pressed');if(dx>0&&dy===0)$('move-right').classList.add('pressed')}\n" \
+"function stopMove(){vel_x=0;vel_y=0;var btns=document.querySelectorAll('.move-btn');for(var i=0;i<btns.length;i++)btns[i].classList.remove('pressed')}\n" \
+"$('move-fwd').addEventListener('mousedown',function(e){e.preventDefault();startMove(0.5,0)});$('move-fwd').addEventListener('touchstart',function(e){e.preventDefault();startMove(0.5,0)});\n" \
+"$('move-back').addEventListener('mousedown',function(e){e.preventDefault();startMove(-0.5,0)});$('move-back').addEventListener('touchstart',function(e){e.preventDefault();startMove(-0.5,0)});\n" \
+"$('move-left').addEventListener('mousedown',function(e){e.preventDefault();startMove(0,-0.5)});$('move-left').addEventListener('touchstart',function(e){e.preventDefault();startMove(0,-0.5)});\n" \
+"$('move-right').addEventListener('mousedown',function(e){e.preventDefault();startMove(0,0.5)});$('move-right').addEventListener('touchstart',function(e){e.preventDefault();startMove(0,0.5)});\n" \
+"['mouseup','touchend'].forEach(function(ev){document.addEventListener(ev,function(){stopMove()})});\n" \
+"$('move-stop').addEventListener('click',function(){stopMove();sendCmd('move_stop')});$('move-stop').addEventListener('touchstart',function(e){e.preventDefault();stopMove();sendCmd('move_stop')});\n" \
+ \
 "</script>\n" \
 "</body>\n" \
 "</html>"

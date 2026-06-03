@@ -190,6 +190,7 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 
 - `flow_hold_t`：封装两个速度 PID + 输出修正角
 - `flow_hold_init()`：初始化 PID（Kp=0.05, Ki=0.01, Kd=0.0，输出限幅 ±5°，积分限幅 2°）
+- `flow_hold_set_velocity(vx, vy)`：设置速度指令（flow 原始单位），0=静止保持，非零=主动移动
 - `flow_hold_update(flow_x, flow_y, qual, height_m)`：有新光流数据时更新
   - 质量门控：`qual > 100` 才有效
   - 高度门控：0.04m < height < 3.0m
@@ -201,10 +202,66 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - 速度环的积分项隐含位置保持效果（∫速度误差 = 位置误差）
 
 ```
-光流 flow_x/flow_y (速度测量，setpoint=0)
+光流 flow_x/flow_y (速度测量，setpoint 可设为非零)
     → 速度 PID → 修正角 ±5°
     → 叠加到 stick 目标角度 → Angle P → Rate PID → Mixer → 电机
 ```
+
+### 3.3.3 水平移动控制（Web 按钮 / P4 API）
+
+#### 速度指令（Web 前端方向按钮）
+
+Web 前端新增 4 个方向按钮（▲前/▼后/◀左/▶右），按住移动、松开停止：
+
+- 按钮事件：`mousedown`/`touchstart` → `vel_x`/`vel_y` = ±0.5，`mouseup`/`touchend` → 清零
+- STOP 按钮：立即清零 + 发送 `move_stop` 命令
+- 速度值通过 50Hz 摇杆数据流发送：`{"vel_x": 0.5, "vel_y": 0.0}`
+- `commander_parse()` 解析 `vel_x`/`vel_y` 字段，钳位 -1.0~1.0
+- 主循环将归一化速度映射为光流单位（×80），取反后送入 flow_hold PID
+- 在所有非 DISARMED 模式下生效，有光流质量门控
+
+#### 位置指令 `move_to`（P4 视觉对接）
+
+P4 检测到垃圾后发送相对位置偏移指令，飞控通过光流积分闭环移动：
+
+```json
+{"cmd": "move_to", "x": 0.5, "y": -0.3}
+```
+
+- x: 前向偏移（光流积分单位），y: 右向偏移
+- 作为延迟命令（`pending_cmd`），在主循环中执行
+- 启动时捕获当前光流积分位置作为起点，目标 = 起点 + 偏移
+- 位置 PID 输出速度指令 → flow_hold 速度环 → 姿态修正 → 电机
+
+#### 停止指令 `move_stop`
+
+```json
+{"cmd": "move_stop"}
+```
+
+立即清零速度指令 + 复位位置控制器，回到静止保持模式。
+
+```
+控制链:
+  Web按钮 → vel_x/vel_y → 速度映射 → flow_hold 速度环 ┐
+  P4 move_to → position 位置环 → 速度指令 → flow_hold 速度环 ┘
+                                                          ↓
+                                              flow_hold PID → 姿态修正角 ±5°
+                                                          ↓
+                                              叠加摇杆 → Angle P → Rate PID → 电机
+```
+
+### 3.3.4 位置控制器 `control/position.h`
+
+用于 P4 的自主位置控制：
+
+- `position_ctrl_t`：封装两个位置 PID + 目标位置
+- `position_init()`：初始化 PID（Kp=0.5, Ki=0.02, Kd=0.0，输出限幅 ±80，积分限幅 30）
+- `position_set_target(offset_x, offset_y, current_ix, current_iy)`：设置目标 = 当前位置 + 偏移
+- `position_update(flow_ix, flow_iy, dt)`：运行位置 PID，输出速度指令
+- `position_reached()`：位置误差 < 20 (flow 单位) 判定到达
+- `position_reset()`：停用并清零所有状态
+- 到达后自动复位 → 回退到静止保持 (velocity setpoint=0)
 
 未来扩展（Phase 3）：
 
@@ -281,6 +338,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 ```json
 {
   "throttle": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0,
+  "vel_x": 0.0, "vel_y": 0.0,
   "mode": "stabilize"
 }
 ```
@@ -292,6 +350,8 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 {"cmd": "level_trim"}        // 水平校准：捕获当前姿态角作为水平零位
 {"cmd": "reset_trim"}        // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机电调校准 (0=FR,1=FL,2=RL,3=RR)
+{"cmd": "move_to", "x": 0.5, "y": -0.3}  // P4 位置偏移指令（光流积分单位）
+{"cmd": "move_stop"}         // 停止所有水平移动
 ```
 
 #### Web 前端 `web_page.h`

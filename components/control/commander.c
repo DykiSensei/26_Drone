@@ -11,10 +11,14 @@ static setpoint_t g_sp = {
     .roll         = 0.0f,
     .pitch        = 0.0f,
     .yaw          = 0.0f,
+    .vel_x        = 0.0f,
+    .vel_y        = 0.0f,
     .mode         = MODE_DISARMED,
     .motor        = {0.0f, 0.0f, 0.0f, 0.0f},
     .motor_active = false,
     .mtrim        = {0.0f, 0.0f, 0.0f, 0.0f},
+    .move_to_x    = 0.0f,
+    .move_to_y    = 0.0f,
 };
 
 static commander_cmd_cb_t g_cmd_cb = NULL;
@@ -61,6 +65,15 @@ void commander_parse(const char *json, int len)
     if (cJSON_IsNumber(item))
         g_sp.yaw = clamp((float)item->valuedouble, -1.0f, 1.0f);
 
+    /* 水平速度指令 */
+    item = cJSON_GetObjectItem(root, "vel_x");
+    if (cJSON_IsNumber(item))
+        g_sp.vel_x = clamp((float)item->valuedouble, -1.0f, 1.0f);
+
+    item = cJSON_GetObjectItem(root, "vel_y");
+    if (cJSON_IsNumber(item))
+        g_sp.vel_y = clamp((float)item->valuedouble, -1.0f, 1.0f);
+
     item = cJSON_GetObjectItem(root, "mode");
     if (cJSON_IsString(item))
         g_sp.mode = parse_mode(item->valuestring);
@@ -99,6 +112,16 @@ void commander_parse(const char *json, int len)
                 g_sp.pending_cmd = CMD_CALIBRATE_MOTOR;
             }
         }
+        else if (strcmp(item->valuestring, "move_to") == 0) {
+            cJSON *x = cJSON_GetObjectItem(root, "x");
+            cJSON *y = cJSON_GetObjectItem(root, "y");
+            if (cJSON_IsNumber(x)) g_sp.move_to_x = (float)x->valuedouble;
+            if (cJSON_IsNumber(y)) g_sp.move_to_y = (float)y->valuedouble;
+            g_sp.pending_cmd = CMD_MOVE_TO;
+        }
+        else if (strcmp(item->valuestring, "move_stop") == 0) {
+            g_sp.pending_cmd = CMD_MOVE_STOP;
+        }
     }
 
     /* Per-motor trim */
@@ -113,8 +136,9 @@ void commander_parse(const char *json, int len)
 
     cJSON_Delete(root);
 
-    ESP_LOGD(TAG, "cmd: thr=%.2f r=%.2f p=%.2f y=%.2f mode=%s",
+    ESP_LOGD(TAG, "cmd: thr=%.2f r=%.2f p=%.2f y=%.2f vx=%.2f vy=%.2f mode=%s",
              g_sp.throttle, g_sp.roll, g_sp.pitch, g_sp.yaw,
+             g_sp.vel_x, g_sp.vel_y,
              commander_mode_name(g_sp.mode));
 }
 

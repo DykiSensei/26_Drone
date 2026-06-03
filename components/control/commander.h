@@ -22,6 +22,8 @@ typedef enum {
     CMD_LEVEL_TRIM,       /* Capture current attitude as level trim */
     CMD_RESET_TRIM,       /* Reset level trim to zero */
     CMD_CALIBRATE_MOTOR,  /* Single ESC calibration */
+    CMD_MOVE_TO,          /* Move to relative position offset (P4) */
+    CMD_MOVE_STOP,        /* Stop all horizontal movement */
 } commander_cmd_t;
 
 typedef struct {
@@ -29,11 +31,15 @@ typedef struct {
     float roll;          /* -1.0 – 1.0 */
     float pitch;         /* -1.0 – 1.0 */
     float yaw;           /* -1.0 – 1.0 */
+    float vel_x;         /* 体轴前向速度指令 -1.0..1.0 */
+    float vel_y;         /* 体轴右向速度指令 -1.0..1.0 */
     flight_mode_t mode;
     float motor[4];      /* manual per-motor throttle 0.0–1.0 */
     bool  motor_active;  /* true when motor[] should override flight ctrl */
     float mtrim[4];      /* per-motor trim offset -0.1–0.1 */
     int   calib_motor;   /* target motor index for single-ESC calibration */
+    float move_to_x;     /* P4 move_to target X offset (flow unit, forward+) */
+    float move_to_y;     /* P4 move_to target Y offset (flow unit, right+) */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

@@ -17,6 +17,7 @@
 #include "mixer.h"
 #include "altitude.h"
 #include "flow_hold.h"
+#include "position.h"
 
 static const char *TAG = "main";
 
@@ -32,9 +33,12 @@ static float g_motor_out[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
 static float g_trim_roll = 0.0f;   /* 水平修正：补偿 MPU6050 安装偏移 */
 static float g_trim_pitch = 0.0f;
 static bool  g_capture_trim = false;
+static bool  g_move_to_pending = false;   /* CMD_MOVE_TO 延迟到主循环处理 */
+static bool  g_move_stop_pending = false; /* CMD_MOVE_STOP 延迟到主循环处理 */
 
 static altitude_ctrl_t g_alt;            /* 定高 PID 控制器 */
 static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
+static position_ctrl_t g_position;        /* 光流位置控制器 (P4 move_to) */
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
 static flight_mode_t   g_prev_mode = MODE_DISARMED;
 
@@ -64,6 +68,14 @@ static void execute_pending_cmd(const setpoint_t *sp)
         motor_calibrate_single(idx);
         break;
     }
+    case CMD_MOVE_TO:
+        g_move_to_pending = true;
+        ESP_LOGW(TAG, "move_to: x=%.1f y=%.1f (flow units)", sp->move_to_x, sp->move_to_y);
+        break;
+    case CMD_MOVE_STOP:
+        g_move_stop_pending = true;
+        ESP_LOGW(TAG, "move_stop");
+        break;
     default:
         break;
     }
@@ -142,6 +154,7 @@ void app_main(void)
     pid_init(&pid_yaw,   0.8f, 0.05f, 0.00f, 0.5f, 0.15f);
     altitude_init(&g_alt);
     flow_hold_init(&g_flow_hold);
+    position_init(&g_position);
 
     /* --- WiFi AP --- */
     if (wifi_ap_init() != 0) {
@@ -176,6 +189,42 @@ void app_main(void)
                         dt);
         attitude_get_euler(&roll, &pitch, &yaw);
 
+        /* 处理延迟的 move_to / move_stop 命令（需要 flow 数据） */
+        const setpoint_t *sp = commander_get_setpoint();
+        if (g_move_to_pending) {
+            position_set_target(&g_position,
+                                sp->move_to_x, sp->move_to_y,
+                                flow.flow_x_i, flow.flow_y_i);
+            g_move_to_pending = false;
+        }
+        if (g_move_stop_pending) {
+            position_reset(&g_position);
+            flow_hold_set_velocity(&g_flow_hold, 0.0f, 0.0f);
+            g_move_stop_pending = false;
+        }
+
+        /* 水平速度指令优先级：位置控制器 > Web按钮 > 默认(0) */
+        /* API 约定: vel_x>0=前向, vel_y>0=右向
+         * flow_hold PID 内部用 -flow 作为测量值 (setpoint=0 即静止保持)
+         * 所以前向移动需要负的 setpoint，此处取反 */
+        float vel_cmd_x = 0.0f, vel_cmd_y = 0.0f;
+        if (g_position.active) {
+            position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
+            if (position_reached(&g_position, flow.flow_x_i, flow.flow_y_i)) {
+                ESP_LOGW(TAG, "position target reached");
+                position_reset(&g_position);
+            } else {
+                vel_cmd_x = -g_position.out_vx;
+                vel_cmd_y = -g_position.out_vy;
+            }
+        } else {
+            if (fabsf(sp->vel_x) > 0.01f || fabsf(sp->vel_y) > 0.01f) {
+                vel_cmd_x = -(sp->vel_x * 80.0f);  /* 归一化 → flow 速度单位 */
+                vel_cmd_y = -(sp->vel_y * 80.0f);
+            }
+        }
+        flow_hold_set_velocity(&g_flow_hold, vel_cmd_x, vel_cmd_y);
+
         /* 光流速度保持：有新数据时更新 */
         if (flow_new == 0) {
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
@@ -191,8 +240,6 @@ void app_main(void)
         }
 
         /* Motor control */
-        const setpoint_t *sp = commander_get_setpoint();
-
         /* Execute deferred commands (calibrate / trim) in main loop context */
         if (sp->pending_cmd != CMD_NONE) {
             execute_pending_cmd(sp);
@@ -210,6 +257,7 @@ void app_main(void)
             pid_reset(&pid_yaw);
             altitude_reset(&g_alt);
             flow_hold_reset(&g_flow_hold);
+            position_reset(&g_position);
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
             if (sp->throttle < 0.05f) {
@@ -220,6 +268,7 @@ void app_main(void)
                 pid_reset(&pid_yaw);
                 altitude_reset(&g_alt);
                 flow_hold_reset(&g_flow_hold);
+                position_reset(&g_position);
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 

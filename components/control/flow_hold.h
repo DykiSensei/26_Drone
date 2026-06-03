@@ -11,6 +11,8 @@ extern "C" {
 typedef struct {
     pid_t   pid_vx;          /* 体轴 X 速度 → pitch 修正角 (deg) */
     pid_t   pid_vy;          /* 体轴 Y 速度 → roll 修正角 (deg) */
+    float   setpoint_vx;     /* X 速度指令 (flow 原始单位) */
+    float   setpoint_vy;     /* Y 速度指令 (flow 原始单位) */
     float   out_pitch_deg;   /* 最新 pitch 修正角 */
     float   out_roll_deg;    /* 最新 roll 修正角 */
     float   quality_gain;    /* 光流质量 EMA 平滑值 0~1 */
@@ -19,6 +21,7 @@ typedef struct {
 } flow_hold_t;
 
 void flow_hold_init(flow_hold_t *fh);
+void flow_hold_set_velocity(flow_hold_t *fh, float vx, float vy);
 void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
                       uint8_t qual, float height_m);
 void flow_hold_reset(flow_hold_t *fh);
