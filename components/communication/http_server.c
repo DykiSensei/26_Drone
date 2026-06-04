@@ -13,10 +13,23 @@ static httpd_handle_t g_server = NULL;
 static int g_ws_fds[WS_MAX_CLIENTS];
 static int g_ws_count = 0;
 static ws_command_cb_t g_cmd_cb = NULL;
+static ws_disconnect_cb_t g_disconnect_cb = NULL;
 
 void http_server_set_command_cb(ws_command_cb_t cb)
 {
     g_cmd_cb = cb;
+}
+
+void http_server_set_disconnect_cb(ws_disconnect_cb_t cb)
+{
+    g_disconnect_cb = cb;
+}
+
+static void check_all_disconnected(void)
+{
+    if (g_ws_count == 0 && g_disconnect_cb) {
+        g_disconnect_cb();
+    }
 }
 
 /* ---- HTTP GET / handler ---- */
@@ -97,6 +110,7 @@ static void ws_close_handler(httpd_handle_t hd, int sockfd)
             g_ws_fds[i] = g_ws_fds[--g_ws_count];
             ESP_LOGI(TAG, "WS client disconnected (fd=%d, total=%d)",
                      sockfd, g_ws_count);
+            check_all_disconnected();
             return;
         }
     }
@@ -164,4 +178,5 @@ void http_server_broadcast(const char *json_str)
             i++;
         }
     }
+    check_all_disconnected();
 }

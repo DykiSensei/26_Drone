@@ -171,7 +171,16 @@
 "function allPWM(val){for(let i=0;i<4;i++){motorPWM[i]=val;let e=$('mot-'+i);if(e)e.textContent=Math.round((val-1000)/10)}}\n" \
 "function connect(){\n" \
 "ws=new WebSocket(wsUrl);\n" \
-"ws.onopen=function(){connected=true;setStatus(true)}\n" \
+"ws.onopen=function(){\n" \
+"connected=true;setStatus(true);\n" \
+"throttle=0;roll=0;pitch=0;yaw=0;mode='disarmed';\n" \
+"motorPWM=[1000,1000,1000,1000];motorTrim=[0,0,0,0];\n" \
+"$('throttle-slider').value=0;$('throttle-val').textContent='0%';\n" \
+"$('yaw-slider').value=0;$('yaw-val').textContent='0.00';\n" \
+"let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');\n" \
+"let disBtn=document.querySelector('.disarm-btn');if(disBtn)disBtn.classList.add('active');\n" \
+"send();\n" \
+"}\n" \
 "ws.onclose=function(){connected=false;setStatus(false);setTimeout(connect,2000)}\n" \
 "ws.onerror=function(){ws.close()}\n" \
 "ws.onmessage=function(e){\n" \

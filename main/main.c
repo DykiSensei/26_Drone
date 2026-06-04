@@ -42,6 +42,12 @@ static position_ctrl_t g_position;        /* 光流位置控制器 (P4 move_to) 
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
 static flight_mode_t   g_prev_mode = MODE_DISARMED;
 
+static void on_all_clients_disconnected(void)
+{
+    commander_reset_setpoint();
+    ESP_LOGW(TAG, "All WS clients disconnected — forcing DISARMED");
+}
+
 static void execute_pending_cmd(const setpoint_t *sp)
 {
     switch (sp->pending_cmd) {
@@ -163,6 +169,7 @@ void app_main(void)
 
     /* --- HTTP + WebSocket --- */
     http_server_set_command_cb(commander_parse);
+    http_server_set_disconnect_cb(on_all_clients_disconnected);
     if (http_server_init() != 0) {
         printf("FATAL: HTTP server init failed\n"); return;
     }
@@ -240,15 +247,29 @@ void app_main(void)
         }
 
         /* Motor control */
+        /* 注意：sp 已在上面定义（处理 move_to / move_stop 时） */
+
+        /* 命令超时检测：超过 500ms 没收遥控指令 → 强制 DISARMED */
+        if (commander_is_command_timeout()) {
+            ESP_LOGE(TAG, "Command timeout! Forcing DISARMED");
+            commander_reset_setpoint();
+            sp = commander_get_setpoint();
+        }
+
         /* Execute deferred commands (calibrate / trim) in main loop context */
         if (sp->pending_cmd != CMD_NONE) {
             execute_pending_cmd(sp);
             commander_clear_pending_cmd();
         }
         if (sp->motor_active) {
-            /* Manual per-motor control (web frontend sliders) */
-            motor_set(sp->motor);
-            memcpy(g_motor_out, sp->motor, sizeof(g_motor_out));
+            /* 手动电机控制也必须检查 DISARMED 和油门安全 */
+            if (sp->mode == MODE_DISARMED || sp->throttle < 0.05f) {
+                motor_stop();
+                memset(g_motor_out, 0, sizeof(g_motor_out));
+            } else {
+                motor_set(sp->motor);
+                memcpy(g_motor_out, sp->motor, sizeof(g_motor_out));
+            }
         } else if (sp->mode == MODE_DISARMED) {
             motor_stop();
             memset(g_motor_out, 0, sizeof(g_motor_out));

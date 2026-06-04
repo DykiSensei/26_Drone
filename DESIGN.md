@@ -314,6 +314,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - WebSocket `/ws`：双向 JSON 通信，最多 4 客户端
 - 帧类型处理：PING 自动回复 PONG，CLOSE 正常断开，非 TEXT 帧忽略
 - 命令回调模式：`http_server_set_command_cb(commander_parse)`
+- **断连安全回调**：`http_server_set_disconnect_cb()` 注册回调，当 `g_ws_count` 降至 0（所有客户端断开）时触发 `commander_reset_setpoint()` 强制 DISARMED。在两处触发：`ws_close_handler`（TCP 断开）和 `http_server_broadcast`（异步发送失败清理）
 
 #### 遥测数据（ESP → 浏览器，100Hz）
 ```json
@@ -368,7 +369,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - **实时传感器数据面板**：姿态数值（含水平修正量显示）、IMU 原始数据、TOF 高度、光流位置、PID 输出
 - **电机 PWM 实时显示**（M1–M4 百分比）+ All MAX/MIN/STOP 快捷按钮
 - 深色主题、移动优先布局、触摸友好
-- WebSocket 自动重连机制（2 秒间隔）
+- WebSocket 自动重连机制（2 秒间隔），**重连时复位所有控制变量**（throttle/roll/pitch/yaw → 0, mode → disarmed, motorPWM → 1000μs, motorTrim → 0），UI 同步复位，并发送 `send()` 同步 DISARMED 到 ESP，防止重连后发送残留的飞行参数
 
 ### 3.7 逐电机微调 Mtrim
 
@@ -392,6 +393,9 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   - `CMD_RESET_TRIM` — 重置水平修正量为零
   - `CMD_CALIBRATE_MOTOR` — 单电机电调校准（带 `motor_index` 参数）
 - 命令通过 `pending_cmd` 字段延迟到主循环执行，确保阻塞操作（校准）不冻结 HTTP/WebSocket 通信
+- **原子更新**：`commander_parse()` 先将当前 `g_sp` 复制到局部变量，在局部变量上修改，最后一次性 struct 赋值写回 `g_sp`，将竞态窗口缩小为单条 memcpy
+- **命令超时**：`commander_is_command_timeout()` 记录最后一次收到有效 WebSocket 命令的时间戳（`esp_timer_get_time()`），若超过 500ms 未收到任何命令 → 主循环强制调用 `commander_reset_setpoint()` 回到 DISARMED
+- **断连复位**：`commander_reset_setpoint()` 将 `g_sp` 重置为安全状态（DISARMED, 油门=0, motor_active=false），同时清零时间戳防止循环触发超时
 
 | 模式 | 描述 | 当前实现 | 需要传感器 |
 |------|------|----------|------------|
@@ -471,7 +475,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - [x] 定高模式（TOF PID 高度环）
 - [x] 光流速度保持（速度环，所有模式生效）
 - [x] WiFi 遥控 + 遥测（WebSocket 已实现）
-- [ ] 失控保护 + 安全逻辑
+- [x] 失控保护 + 安全逻辑（命令超时 500ms → DISARMED，断连 → DISARMED，前端重连安全复位，motor_active 路径增加安全门禁）
 
 ### Phase 4：调优与完善
 - [ ] PID 参数整定（已从初始值调整，仍需试飞确认）
@@ -484,14 +488,17 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 ## 6. 安全设计原则
 
 1. **上锁/解锁机制**：上电默认 DISARMED，需显式切换模式解锁
-2. **油门死区**：throttle < 5% → 停转 + PID 复位，防止地面角度环意外驱动电机
+2. **油门死区**：throttle < 5% → 停转 + PID 复位，防止地面角度环意外驱动电机。`motor_active` 手动电机控制路径同样受此约束
 3. **MOTOR_MIN 地板**：mixer 输出不低于 5%，确保电机不意外停转，但采用 floor-clip 而非 shift-up（避免零油门安全隐患）
-4. **失控保护**：遥控信号丢失 > 500ms → 强制降落 — 待实现
-5. **低电量保护**：电池电压 < 阈值 → LED告警 → 自动降落 — 待实现
-6. **看门狗**：任一关键任务卡死 → 系统复位 — 待实现
-7. **传感器失效检测**：I2C 通信失败重试3次 → 切换降落模式 — 待实现
-8. **电机输出限幅**：PWM 范围硬限制，mixer 输出钳位 0.0–1.0
-9. **命令延迟执行**：校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 HTTP/WebSocket 通信任务
+4. **失控保护（命令超时）**：超过 500ms 未收到 WebSocket 命令 → `commander_is_command_timeout()` 返回 true → 主循环调用 `commander_reset_setpoint()` 强制 DISARMED ✅
+5. **断连保护**：所有 WebSocket 客户端断开（`g_ws_count == 0`）→ `http_server` 触发 `ws_disconnect_cb` → `commander_reset_setpoint()` 强制 DISARMED ✅
+6. **前端重连安全**：WebSocket 重连时前端复位所有控制变量（throttle/roll/pitch/yaw → 0, mode → disarmed, motorPWM → 1000μs），UI 同步复位，发送 DISARMED 到 ESP ✅
+7. **setpoint 原子更新**：`commander_parse()` 先在局部变量构建完整 setpoint，再一次 struct 赋值写入 `g_sp`，避免逐字段修改被主循环读到中间态 ✅
+8. **低电量保护**：电池电压 < 阈值 → LED告警 → 自动降落 — 待实现
+9. **看门狗**：任一关键任务卡死 → 系统复位 — 待实现
+10. **传感器失效检测**：I2C 通信失败重试3次 → 切换降落模式 — 待实现
+11. **电机输出限幅**：PWM 范围硬限制，mixer 输出钳位 0.0–1.0
+12. **命令延迟执行**：校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 HTTP/WebSocket 通信任务
 
 ---
 

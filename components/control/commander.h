@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+#define COMMAND_TIMEOUT_US  500000   /* 500ms — auto-DISARM if no command received */
+
 typedef enum {
     MODE_DISARMED  = 0,
     MODE_STABILIZE = 1,
@@ -45,6 +47,7 @@ typedef struct {
 
 /**
  * @brief 解析 WebSocket 发来的 JSON 遥控命令，更新内部 setpoint
+ *        先解析到临时变量，再一次写入 g_sp，缩小竞态窗口
  * @param json JSON 字符串
  * @param len  字符串长度
  */
@@ -60,6 +63,18 @@ const setpoint_t *commander_get_setpoint(void);
  * @brief 获取当前飞行模式名
  */
 const char *commander_mode_name(flight_mode_t mode);
+
+/**
+ * @brief 强制复位 setpoint 到安全状态（DISARMED, 油门=0）
+ *        WebSocket 全部断开或命令超时时调用
+ */
+void commander_reset_setpoint(void);
+
+/**
+ * @brief 检查距上次收到有效命令是否超时
+ * @return true 已超时（应强制 DISARMED）
+ */
+bool commander_is_command_timeout(void);
 
 /**
  * @brief Callback for handling special commands (calibrate, etc.)
