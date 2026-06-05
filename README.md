@@ -129,11 +129,13 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 
 ```json
 {"cmd": "calibrate"}                      // 四路 ESC 油门校准
-{"cmd": "gyro_calib"}                     // 陀螺仪零偏再校准（保持静止 1 秒）
-{"cmd": "level_trim"}                     // 捕获当前姿态角作为水平零位
+{"cmd": "gyro_calib"}                     // 陀螺仪+加速度计零偏再校准（放水平面，保持静止 1 秒，自动复位 Mahony）
+{"cmd": "level_trim"}                     // 捕获当前姿态角作为水平零位（gyro_calib 后等 2 秒再执行）
 {"cmd": "reset_trim"}                     // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
 ```
+
+> **起飞前校准流程**：放在起飞面 → `gyro_calib` → 等 2 秒 → `level_trim` → 解锁起飞
 
 ### 遥测数据（ESP → 浏览器，100Hz）
 
@@ -157,8 +159,8 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 
 | 轴 | Kp | Ki | Kd | 输出限幅 | 积分限幅 |
 |----|----|----|----|----|----|
-| Roll Rate | 0.5 | 0.02 | 0.04 | ±0.5 | 0.15 |
-| Pitch Rate | 0.5 | 0.02 | 0.04 | ±0.5 | 0.15 |
+| Roll Rate | 0.25 | 0.02 | 0.01 | ±0.8 | 0.15 |
+| Pitch Rate | 0.25 | 0.02 | 0.01 | ±0.8 | 0.15 |
 | Yaw Rate | 0.8 | 0.05 | 0.0 | ±0.5 | 0.15 |
 | Angle P | 6.0×DEG2RAD | — | — | ±30° | — |
 | Altitude | 0.5 | 0.05 | 0.0 | ±0.3 油门 | 0.15 |
@@ -183,6 +185,10 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 - [x] 定高模式（TOF 高度 PID）
 - [x] 光流速度保持 + 位置控制
 - [x] 水平移动 API（vel_x/vel_y + move_to）+ 前端方向按钮
+- [x] 安全机制完善（命令超时 + 断连保护 + 校准链路修复）
+- [x] 姿态校准修复（gyro+accel 同步重校准 + Mahony 复位）
+- [x] 推力不对称补偿（Mtrim 逐电机微调）
+- [ ] 光流模块维修（当前 `FLOW_ENABLED=0` 禁用中）
 - [ ] 1kHz 稳定器主循环重构
 - [ ] 失控保护 + 安全逻辑
 - [ ] 电池监测 (ADC)

@@ -10,19 +10,28 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`.
 
 ## Build & Flash
 
-- ESP-IDF environment: `C:/Espressif/frameworks/esp-idf-v5.5.4/` (or `D:/Espressif/...` on the reference machine)
+- ESP-IDF environment: `D:/Espressif/frameworks/esp-idf-v5.5.4/`
 - Target: `esp32s3`
 - Flash port: `COM14`
 
+On this machine, `idf.py` is not on PATH — invoke via the full Python + idf.py path:
+
 ```bash
-# First time on a new machine (or after clean clone):
-idf.py set-target esp32s3
+# Set up ESP-IDF env (needed once per shell):
+export PATH="D:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119/xtensa-esp-elf/bin:D:/Espressif/tools/cmake/3.30.2/bin:D:/Espressif/tools/ninja/1.12.1:$PATH"
+export IDF_PATH="D:/Espressif/frameworks/esp-idf-v5.5.4"
 
 # Build
-idf.py build
+python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone build
 
 # Flash + monitor
-idf.py flash monitor
+python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone flash monitor
+
+# Clean build (after messing with config)
+python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone fullclean
+
+# On new machines: set target first
+python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone set-target esp32s3
 ```
 
 ## Pinout
@@ -65,6 +74,13 @@ MPU6050 → Mahony → Euler angles (roll/pitch/yaw)
   Commander setpoint → target angle (±30°) → Angle P → target rate
   → Rate PID → torque → Mixer (X-quad) → 4×LEDC PWM → motors
 ```
+
+**Horizontal movement** (vel_x/vel_y → flow_hold, move_to → position → flow_hold):
+```
+Web buttons → vel_x/vel_y  ──→ flow_hold velocity PID ──→ ±5° correction to target angle
+P4 move_to → position PID ──→ velocity setpoint ────────→
+```
+Position controller uses optical flow integral as position feedback (dead-reckoning in flow units). On reaching target, position controller resets and falls back to velocity=0 hold.
 
 **Task layout** (dual-core FreeRTOS):
 - Core 0: WiFi protocol stack (ESP-IDF managed)

@@ -108,7 +108,7 @@ Commander setpoint → 模式判断:
 - 配置：陀螺仪 ±2000°/s, 加速度计 ±16g, DLPF 256Hz, 采样率 8kHz (gyro) / 1kHz (accel)
 - 上电自动校准：采样 500 次求零偏（陀螺仪 xyz + 加速度 xy）
 - 输出单位：加速度 m/s², 角速度 rad/s, 已扣除零偏
-- **运行时陀螺仪再校准**：`mpu6050_recalibrate_gyro()`，采样 100 次（1 秒），用于起飞前零偏修正
+- **起飞前再校准**：`mpu6050_recalibrate_gyro()`，采样 100 次（1 秒），**同步重校准陀螺仪零偏和加速度计 x/y 零偏**。加速度计以当前放置面为"水平"基准，消除上电面与起飞面不一致导致的姿态偏差。校准后自动调用 `attitude_init()` 复位 Mahony 滤波器（防止旧积分项使用过期零偏导致漂移），约 2 秒内重新收敛到真实姿态
 
 #### TOF400F 驱动 `drivers/tof400f.h`
 - I2C0 (SDA=GPIO9, SCL=GPIO8, 400kHz)，设备地址 0x29
@@ -162,7 +162,7 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - `pid_init(&pid, kp, ki, kd, output_limit, integral_limit)`
 - `pid_update(&pid, setpoint, measurement, dt)` — 采用 **derivative on measurement** 避免 setpoint kick
 - 当前调优参数：
-  - roll/pitch rate PID：`Kp=0.5, Ki=0.02, Kd=0.04`，输出限幅 ±0.5，积分限幅 0.15
+  - roll/pitch rate PID：`Kp=0.25, Ki=0.02, Kd=0.01`，输出限幅 ±0.8，积分限幅 0.15
   - yaw rate PID：`Kp=0.8, Ki=0.05, Kd=0.0`，输出限幅 ±0.5，积分限幅 0.15
 - 角度环参数（STABILIZE 模式）：
   - `MAX_ANGLE_DEG = 30°` — 最大倾斜角

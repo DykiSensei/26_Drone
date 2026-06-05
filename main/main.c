@@ -21,6 +21,9 @@
 
 static const char *TAG = "main";
 
+/* 光流模块开关 — 模块损坏时置 0 禁用 */
+#define FLOW_ENABLED 0
+
 /* 最大目标角速度 (rad/s) — 对应 setpoint 的 ±1.0 */
 #define MAX_RATE_RAD_S  3.0f
 
@@ -58,6 +61,11 @@ static void execute_pending_cmd(const setpoint_t *sp)
     case CMD_GYRO_CALIB:
         ESP_LOGW(TAG, "Gyro recalibration started (keep drone still)");
         mpu6050_recalibrate_gyro();
+        /* 必须复位 Mahony：gyro 零偏已更新，旧的积分项（为旧零偏累积）
+           会立刻导致姿态漂移。复位后 Mahony 从水平姿态重新收敛，
+           约 2 秒内稳定，之后再做水平校准才能捕获正确值。 */
+        attitude_init();
+        ESP_LOGW(TAG, "Mahony reset — wait 2s before level trim!");
         break;
     case CMD_LEVEL_TRIM:
         ESP_LOGW(TAG, "=== LEVEL TRIM: will capture on next loop ===");
@@ -142,9 +150,13 @@ void app_main(void)
     if (tof400f_init() != 0) {
         printf("FATAL: tof init failed\n"); return;
     }
+#if FLOW_ENABLED
     if (pv3901l1_init() != 0) {
         printf("FATAL: flow init failed\n"); return;
     }
+#else
+    ESP_LOGW(TAG, "FLOW DISABLED — PV3901L1 skipped");
+#endif
 
     /* --- Motors --- */
     if (motor_init() != 0) {
@@ -155,8 +167,8 @@ void app_main(void)
     attitude_init();
 
     /* --- PID controllers (rate mode, balanced for initial flight) --- */
-    pid_init(&pid_roll,  0.5f, 0.02f, 0.04f, 0.5f, 0.15f);
-    pid_init(&pid_pitch, 0.5f, 0.02f, 0.04f, 0.5f, 0.15f);
+    pid_init(&pid_roll,  0.25f, 0.02f, 0.01f, 0.8f, 0.15f);
+    pid_init(&pid_pitch, 0.25f, 0.02f, 0.01f, 0.8f, 0.15f);
     pid_init(&pid_yaw,   0.8f, 0.05f, 0.00f, 0.5f, 0.15f);
     altitude_init(&g_alt);
     flow_hold_init(&g_flow_hold);
@@ -188,7 +200,12 @@ void app_main(void)
     while (1) {
         mpu6050_read(&imu);
         tof400f_get_distance(&tof_mm);
+#if FLOW_ENABLED
         int flow_new = pv3901l1_get_data(&flow);
+#else
+        int flow_new = -1;
+        memset(&flow, 0, sizeof(flow));
+#endif
 
         /* Mahony AHRS fusion */
         attitude_update(imu.accel_x, imu.accel_y, imu.accel_z,
@@ -198,6 +215,7 @@ void app_main(void)
 
         /* 处理延迟的 move_to / move_stop 命令（需要 flow 数据） */
         const setpoint_t *sp = commander_get_setpoint();
+#if FLOW_ENABLED
         if (g_move_to_pending) {
             position_set_target(&g_position,
                                 sp->move_to_x, sp->move_to_y,
@@ -237,6 +255,10 @@ void app_main(void)
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
                              flow.qual, tof_mm * 0.001f);
         }
+#else
+        g_move_to_pending = false;
+        g_move_stop_pending = false;
+#endif
 
         /* 捕获水平修正量（必须在水平放置时触发） */
         if (g_capture_trim) {
@@ -294,12 +316,14 @@ void app_main(void)
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 
             /* POS_HOLD 切入时重置光流积分 */
+#if FLOW_ENABLED
             bool entering_poshold = (sp->mode == MODE_POS_HOLD)
                                  && (g_prev_mode != MODE_POS_HOLD);
             if (entering_poshold) {
                 pv3901l1_reset_integral();
                 ESP_LOGW(TAG, "POS_HOLD: flow integral reset");
             }
+#endif
 
             /* --- 定高：模式切入时捕获当前高度为目标 --- */
             bool entering_alt = alt_mode

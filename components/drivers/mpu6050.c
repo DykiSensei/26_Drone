@@ -138,16 +138,19 @@ int mpu6050_init(void)
 
 int mpu6050_recalibrate_gyro(void)
 {
-    ESP_LOGW(TAG, "=== GYRO RECALIBRATION ===");
-    ESP_LOGW(TAG, "Keep drone COMPLETELY STILL for 1 second...");
+    ESP_LOGW(TAG, "=== GYRO + ACCEL RECALIBRATION ===");
+    ESP_LOGW(TAG, "Keep drone COMPLETELY STILL and LEVEL for 1 second...");
 
     const int samples = 100;   /* 100 samples @ 100Hz = 1s */
     int64_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
+    int64_t sum_ax = 0, sum_ay = 0;
     int valid = 0;
 
     for (int i = 0; i < samples; i++) {
         uint8_t buf[14];
         if (read_reg(REG_ACCEL_XOUT_H, buf, 14) == ESP_OK) {
+            sum_ax += (int16_t)((buf[0]  << 8) | buf[1]);
+            sum_ay += (int16_t)((buf[2]  << 8) | buf[3]);
             sum_gx += (int16_t)((buf[8]  << 8) | buf[9]);
             sum_gy += (int16_t)((buf[10] << 8) | buf[11]);
             sum_gz += (int16_t)((buf[12] << 8) | buf[13]);
@@ -161,12 +164,19 @@ int mpu6050_recalibrate_gyro(void)
         return -1;
     }
 
+    /* 更新陀螺仪零偏 */
     g_gyro_offs[0] = (float)(sum_gx / valid) * GYRO_SCALE_2000 * DEG2RAD;
     g_gyro_offs[1] = (float)(sum_gy / valid) * GYRO_SCALE_2000 * DEG2RAD;
     g_gyro_offs[2] = (float)(sum_gz / valid) * GYRO_SCALE_2000 * DEG2RAD;
 
-    ESP_LOGI(TAG, "recalibration done: gyro_offs=(%.4f,%.4f,%.4f) rad/s",
-             g_gyro_offs[0], g_gyro_offs[1], g_gyro_offs[2]);
+    /* 同步更新加速度计零偏 — 以当前放置面为"水平"基准，
+     * 消除上电面与起飞面不一致导致的姿态偏差 */
+    g_accel_offs[0] = (float)(sum_ax / valid) * ACCEL_SCALE_16G * GRAVITY;
+    g_accel_offs[1] = (float)(sum_ay / valid) * ACCEL_SCALE_16G * GRAVITY;
+
+    ESP_LOGI(TAG, "recal done: gyro=(%.4f,%.4f,%.4f) rad/s, accel=(%.4f,%.4f) m/s^2",
+             g_gyro_offs[0], g_gyro_offs[1], g_gyro_offs[2],
+             g_accel_offs[0], g_accel_offs[1]);
     return 0;
 }
 
