@@ -26,6 +26,7 @@ typedef enum {
     CMD_CALIBRATE_MOTOR,  /* Single ESC calibration */
     CMD_MOVE_TO,          /* Move to relative position offset (P4) */
     CMD_MOVE_STOP,        /* Stop all horizontal movement */
+    CMD_TAKEOFF,          /* Auto takeoff to specified height */
 } commander_cmd_t;
 
 typedef struct {
@@ -42,6 +43,8 @@ typedef struct {
     int   calib_motor;   /* target motor index for single-ESC calibration */
     float move_to_x;     /* P4 move_to target X offset (flow unit, forward+) */
     float move_to_y;     /* P4 move_to target Y offset (flow unit, right+) */
+    float takeoff_height;   /* takeoff target altitude in meters */
+    float takeoff_throttle; /* takeoff base throttle 0.0–1.0 */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

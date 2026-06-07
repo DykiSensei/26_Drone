@@ -173,7 +173,7 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - 低油门 (< 5%) 时停转 + PID 复位，防止地面翘机
 - 混控 `MIXER_SCALE = 0.2f`，电机最低怠速 5%（`MOTOR_MIN`）
 
-**定高/悬停模式**：ALT_HOLD / POS_HOLD 均使用角度外环（同 STABILIZE）+ 定高 PID（TOF 反馈）。POS_HOLD 的位置环待实现。
+**定高/悬停模式**：ALT_HOLD / POS_HOLD 均使用角度外环（同 STABILIZE）+ 定高 PID（TOF 反馈）。POS_HOLD 额外启用光流速度保持 + 位置控制。
 
 ### 3.3.1 定高控制器 `control/altitude.h`
 
@@ -353,6 +353,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机电调校准 (0=FR,1=FL,2=RL,3=RR)
 {"cmd": "move_to", "x": 0.5, "y": -0.3}  // P4 位置偏移指令（光流积分单位）
 {"cmd": "move_stop"}         // 停止所有水平移动
+{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞（高度0.2~2.0m，油门0.25~0.6）
 ```
 
 #### Web 前端 `web_page.h`
@@ -364,6 +365,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   - `click` + `touchstart` 双事件绑定，解决移动端模式切换问题
   - 间隔发送 `sendStick()`（不含 mode），按钮点击调用 `send()`（含 mode），消除遥控反馈回环
 - **校准按钮**：陀螺仪校准、水平校准、重置水平
+- **自动起飞面板**：目标高度滑块（0.2–2.0m）+ 基准油门滑块（0.25–0.6）+ 起飞按钮
 - **单电机校准**：每路电机独立校准按钮（拆桨安全确认）
 - **逐电机微调**（Mtrim）：每路电机 ± 按钮（范围 ±0.15），补偿硬件个体差异
 - **实时传感器数据面板**：姿态数值（含水平修正量显示）、IMU 原始数据、TOF 高度、光流位置、PID 输出
@@ -392,6 +394,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   - `CMD_LEVEL_TRIM` — 捕获当前姿态角作为水平零位
   - `CMD_RESET_TRIM` — 重置水平修正量为零
   - `CMD_CALIBRATE_MOTOR` — 单电机电调校准（带 `motor_index` 参数）
+  - `CMD_TAKEOFF` — 自动起飞（设定目标高度，切入 ALT_HOLD，设定基准油门）
 - 命令通过 `pending_cmd` 字段延迟到主循环执行，确保阻塞操作（校准）不冻结 HTTP/WebSocket 通信
 - **原子更新**：`commander_parse()` 先将当前 `g_sp` 复制到局部变量，在局部变量上修改，最后一次性 struct 赋值写回 `g_sp`，将竞态窗口缩小为单条 memcpy
 - **命令超时**：`commander_is_command_timeout()` 记录最后一次收到有效 WebSocket 命令的时间戳（`esp_timer_get_time()`），若超过 500ms 未收到任何命令 → 主循环强制调用 `commander_reset_setpoint()` 回到 DISARMED

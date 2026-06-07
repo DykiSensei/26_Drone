@@ -22,7 +22,7 @@
 static const char *TAG = "main";
 
 /* 光流模块开关 — 模块损坏时置 0 禁用 */
-#define FLOW_ENABLED 0
+#define FLOW_ENABLED 1
 
 /* 最大目标角速度 (rad/s) — 对应 setpoint 的 ±1.0 */
 #define MAX_RATE_RAD_S  3.0f
@@ -38,6 +38,7 @@ static float g_trim_pitch = 0.0f;
 static bool  g_capture_trim = false;
 static bool  g_move_to_pending = false;   /* CMD_MOVE_TO 延迟到主循环处理 */
 static bool  g_move_stop_pending = false; /* CMD_MOVE_STOP 延迟到主循环处理 */
+static bool  g_takeoff_pending = false;   /* CMD_TAKEOFF 延迟到主循环处理 */
 
 static altitude_ctrl_t g_alt;            /* 定高 PID 控制器 */
 static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
@@ -89,6 +90,11 @@ static void execute_pending_cmd(const setpoint_t *sp)
     case CMD_MOVE_STOP:
         g_move_stop_pending = true;
         ESP_LOGW(TAG, "move_stop");
+        break;
+    case CMD_TAKEOFF:
+        g_takeoff_pending = true;
+        ESP_LOGW(TAG, "takeoff: height=%.2f m, throttle=%.2f",
+                 sp->takeoff_height, sp->takeoff_throttle);
         break;
     default:
         break;
@@ -332,6 +338,13 @@ void app_main(void)
                 altitude_capture_target(&g_alt, tof_mm * 0.001f);
                 ESP_LOGW(TAG, "AltHold target captured: %.3f m (%u mm)",
                          g_alt.target_m, tof_mm);
+            }
+
+            /* --- 起飞：覆盖高度目标为用户指定值 --- */
+            if (g_takeoff_pending) {
+                altitude_capture_target(&g_alt, sp->takeoff_height);
+                ESP_LOGW(TAG, "Takeoff: target=%.2f m", sp->takeoff_height);
+                g_takeoff_pending = false;
             }
 
             /* --- 高度环 PID --- */

@@ -99,7 +99,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
    - **密码**：`12345678`
    - **IP**：`192.168.4.1`
 2. 浏览器打开 `http://192.168.4.1`
-3. 界面提供：虚拟摇杆（Roll/Pitch）、油门滑块、Yaw 滑块、模式按钮、方向键、校准按钮
+3. 界面提供：虚拟摇杆（Roll/Pitch）、油门滑块、Yaw 滑块、模式按钮、方向键、校准按钮、自动起飞面板
 
 ## WebSocket API
 
@@ -133,6 +133,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 {"cmd": "level_trim"}                     // 捕获当前姿态角作为水平零位（gyro_calib 后等 2 秒再执行）
 {"cmd": "reset_trim"}                     // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
+{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
 ```
 
 > **起飞前校准流程**：放在起飞面 → `gyro_calib` → 等 2 秒 → `level_trim` → 解锁起飞
@@ -188,7 +189,8 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 - [x] 安全机制完善（命令超时 + 断连保护 + 校准链路修复）
 - [x] 姿态校准修复（gyro+accel 同步重校准 + Mahony 复位）
 - [x] 推力不对称补偿（Mtrim 逐电机微调）
-- [ ] 光流模块维修（当前 `FLOW_ENABLED=0` 禁用中）
+- [x] 自动起飞功能（前端滑块设定高度+基准油门，一键起飞）
+- [x] 光流传感器重新启用（`FLOW_ENABLED=1`）
 - [ ] 1kHz 稳定器主循环重构
 - [ ] 失控保护 + 安全逻辑
 - [ ] 电池监测 (ADC)

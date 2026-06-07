@@ -112,6 +112,14 @@
 "<button class=\"mode-btn\" data-mode=\"alt_hold\">定高</button>\n" \
 "<button class=\"mode-btn\" data-mode=\"pos_hold\">悬停</button>\n" \
 "</div>\n" \
+"<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
+"<h3>自动起飞</h3>\n" \
+"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">目标高度: <span id=\"takeoff-h-val\">0.5</span> m</label><br>\n" \
+"<input type=\"range\" id=\"takeoff-h\" min=\"0.2\" max=\"2.0\" step=\"0.1\" value=\"0.5\" style=\"width:100%\"></div>\n" \
+"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">基准油门: <span id=\"takeoff-t-val\">0.40</span></label><br>\n" \
+"<input type=\"range\" id=\"takeoff-t\" min=\"0.25\" max=\"0.6\" step=\"0.01\" value=\"0.4\" style=\"width:100%\"></div>\n" \
+"<button id=\"takeoff-btn\" style=\"width:100%;margin-top:4px;padding:8px;font-size:14px;background:#238636;border-color:#2ea043;color:#fff\" onclick=\"doTakeoff()\" ontouchstart=\"event.preventDefault();doTakeoff()\">起飞</button>\n" \
+"</div>\n" \
 "<div class=\"dpad\" id=\"dpad\">\n" \
 "<div class=\"dpad-empty\"></div>\n" \
 "<button class=\"dpad-btn\" onmousedown=\"pitch=0.5\" onmouseup=\"pitch=0\" ontouchstart=\"pitch=0.5\" ontouchend=\"pitch=0\">▲</button>\n" \
@@ -231,6 +239,10 @@
 "$('move-right').addEventListener('mousedown',function(e){e.preventDefault();startMove(0,0.5)});$('move-right').addEventListener('touchstart',function(e){e.preventDefault();startMove(0,0.5)});\n" \
 "['mouseup','touchend'].forEach(function(ev){document.addEventListener(ev,function(){stopMove()})});\n" \
 "$('move-stop').addEventListener('click',function(){stopMove();sendCmd('move_stop')});$('move-stop').addEventListener('touchstart',function(e){e.preventDefault();stopMove();sendCmd('move_stop')});\n" \
+"/* 起飞控制 */\n" \
+"$('takeoff-h').addEventListener('input',function(){$('takeoff-h-val').textContent=parseFloat(this.value).toFixed(1)});\n" \
+"$('takeoff-t').addEventListener('input',function(){$('takeoff-t-val').textContent=parseFloat(this.value).toFixed(2)});\n" \
+"function doTakeoff(){if(!connected)return;var h=parseFloat($('takeoff-h').value);var t=parseFloat($('takeoff-t').value);ws.send(JSON.stringify({cmd:'takeoff',height:h,base_throttle:t}));throttle=t;$('throttle-slider').value=t;$('throttle-val').textContent=(t*100).toFixed(0)+'%';setMode('alt_hold');showToast('起飞: '+h.toFixed(1)+'m')}\n" \
  \
 "</script>\n" \
 "</body>\n" \

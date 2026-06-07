@@ -130,6 +130,15 @@ void commander_parse(const char *json, int len)
         else if (strcmp(item->valuestring, "move_stop") == 0) {
             sp.pending_cmd = CMD_MOVE_STOP;
         }
+        else if (strcmp(item->valuestring, "takeoff") == 0) {
+            cJSON *h = cJSON_GetObjectItem(root, "height");
+            cJSON *t = cJSON_GetObjectItem(root, "base_throttle");
+            if (cJSON_IsNumber(h))
+                sp.takeoff_height = clamp((float)h->valuedouble, 0.2f, 2.0f);
+            if (cJSON_IsNumber(t))
+                sp.takeoff_throttle = clamp((float)t->valuedouble, 0.25f, 0.6f);
+            sp.pending_cmd = CMD_TAKEOFF;
+        }
     }
 
     /* Per-motor trim */
@@ -175,6 +184,8 @@ void commander_reset_setpoint(void)
         .calib_motor  = 0,
         .move_to_x    = 0.0f,
         .move_to_y    = 0.0f,
+        .takeoff_height   = 0.5f,
+        .takeoff_throttle = 0.4f,
         .pending_cmd  = CMD_NONE,
     };
     g_sp = safe;

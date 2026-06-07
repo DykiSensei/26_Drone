@@ -93,7 +93,7 @@ Position controller uses optical flow integral as position feedback (dead-reckon
 - **TOF skip-counter**: VL53L1X data-ready checked every 10th call (@100Hz ≈ every 100ms) to match sensor timing budget; cached values returned otherwise.
 - **Deferred command execution**: Blocking operations (ESC calibration, gyro recalibration) are queued via `pending_cmd` and executed in the main loop context — never from the HTTP server task. This prevents WiFi/WebSocket freeze during calibration.
 - **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE. POS_HOLD adds optical flow velocity hold on top of ALT_HOLD. Mode transitions auto-capture target height and reset flow integrals.
-- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`. Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
+- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`. Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
 - **Safety mechanisms**:
   - 500ms command timeout: if no WebSocket message received for >500ms → auto-DISARMED
   - All-clients-disconnected → `commander_reset_setpoint()` forces DISARMED + throttle=0
@@ -130,7 +130,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 **Control:**
 - `pid.h` — `pid_init()`, `pid_update()`, `pid_reset()`, `pid_t`
 - `mixer.h` — `mixer_apply()`
-- `commander.h` — `commander_parse()`, `commander_get_setpoint()`, `commander_reset_setpoint()`, `commander_is_command_timeout()`, `commander_clear_pending_cmd()`, `commander_mode_name()`, `setpoint_t` (includes `vel_x`, `vel_y`, `move_to_x`, `move_to_y`), `flight_mode_t`, `CMD_*` enums
+- `commander.h` — `commander_parse()`, `commander_get_setpoint()`, `commander_reset_setpoint()`, `commander_is_command_timeout()`, `commander_clear_pending_cmd()`, `commander_mode_name()`, `setpoint_t` (includes `vel_x`, `vel_y`, `move_to_x`, `move_to_y`, `takeoff_height`, `takeoff_throttle`), `flight_mode_t`, `CMD_*` enums
 - `altitude.h` — `altitude_init()`, `altitude_update()`, `altitude_capture_target()`, `altitude_reset()`, `altitude_ctrl_t`
 - `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_update()`, `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
 - `position.h` — `position_init()`, `position_set_target()`, `position_update()`, `position_reset()`, `position_reached()`, `position_ctrl_t`
