@@ -31,6 +31,16 @@ static const char *TAG = "main";
 #define MAX_ANGLE_DEG   30.0f                   /* 最大倾斜角 ±30° */
 #define ANGLE_KP        (6.0f * 0.017453293f)   /* ≈0.105 rad/s 每度误差 */
 
+/* ---- 光流横向接管参数（Phase-1 止血核心）----
+ * 起飞向一侧倾的根因：离地前就用"脏"光流积分锁点、且位置环无质量门控。
+ * 改为：起飞/爬升期完全禁用光流横向，等高度收敛到目标 + 垂直速度小 +
+ * 光流质量连续达标后，用"此刻已稳定"的积分锁点，且修正增益从 0 软启动。 */
+#define LAT_ALT_TOL     0.12f   /* 距最终目标高度的容差 (m) — 内即视为已收敛 */
+#define LAT_VZ_MAX      0.15f   /* 垂直速度稳定阈值 (m/s) */
+#define LAT_QUAL_MIN    50      /* 光流质量门限 */
+#define LAT_QUAL_CNT    50      /* 上述条件需连续满足的周期数 (@100Hz ≈ 0.5s) */
+#define LAT_GAIN_STEP   0.01f   /* 修正增益每周期斜率 → 0→1 约 1s 软启动 */
+
 static pid_t pid_roll, pid_pitch, pid_yaw;
 static float g_motor_out[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
 static float g_trim_roll = 0.0f;   /* 水平修正：补偿 MPU6050 安装偏移 */
@@ -45,6 +55,11 @@ static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
 static position_ctrl_t g_position;        /* 光流位置控制器 (P4 move_to) */
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
 static flight_mode_t   g_prev_mode = MODE_DISARMED;
+
+/* 光流横向接管状态机 */
+static bool  g_lat_engaged   = false;  /* 横向接管已激活（高度稳定 + 光流达标后） */
+static int   g_lat_qual_cnt  = 0;      /* 接管条件连续满足的周期计数 */
+static float g_lat_gain       = 0.0f;  /* 横向修正软启动增益 0~1（叠加到目标倾角前相乘） */
 
 static void on_all_clients_disconnected(void)
 {
@@ -120,6 +135,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
+        "\"lat\":{\"en\":%d,\"g\":%.2f},"
         "\"mode\":\"%s\""
         "}",
         imu->accel_x, imu->accel_y, imu->accel_z,
@@ -137,6 +153,7 @@ static void build_telemetry(char *buf, size_t sz,
         commander_get_setpoint()->mtrim[3],
         pid_r, pid_p, pid_y,
         g_trim_roll, g_trim_pitch,
+        g_lat_engaged, g_lat_gain,
         commander_mode_name(commander_get_setpoint()->mode)
     );
 }
@@ -223,13 +240,47 @@ void app_main(void)
         /* 处理延迟的 move_to / move_stop 命令（需要 flow 数据） */
         const setpoint_t *sp = commander_get_setpoint();
 #if FLOW_ENABLED
-        bool alt_mode_h = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
-        bool web_vel    = (fabsf(sp->vel_x) > 0.01f || fabsf(sp->vel_y) > 0.01f);
+        bool  alt_mode_h = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
+        bool  web_vel    = (fabsf(sp->vel_x) > 0.01f || fabsf(sp->vel_y) > 0.01f);
+        float tof_m_h    = tof_mm * 0.001f;
 
+        /* ---- 光流横向接管状态机 ----
+         * 接管条件：定高模式 + 高度已收敛到最终目标 + 垂直速度小 + 光流质量
+         * 连续达标。满足后用"此刻已稳定"的光流积分锁点，并把修正增益从 0 软启动。
+         * 起飞/爬升期 g_lat_engaged=false → 横向完全交还，根除离地前脏锁点导致的倾斜。 */
+        bool height_settled = g_alt.target_valid
+                           && fabsf(tof_m_h - g_alt.target_final_m) < LAT_ALT_TOL
+                           && fabsf(g_alt.vz) < LAT_VZ_MAX;
+        bool flow_ok = (flow.qual > LAT_QUAL_MIN) && (tof_m_h > 0.04f);
+
+        if (alt_mode_h && height_settled && flow_ok) {
+            if (g_lat_qual_cnt < LAT_QUAL_CNT) g_lat_qual_cnt++;
+        } else {
+            g_lat_qual_cnt = 0;
+        }
+        if (!alt_mode_h) g_lat_engaged = false;
+        if (g_lat_qual_cnt >= LAT_QUAL_CNT && !g_lat_engaged) {
+            g_lat_engaged = true;
+            position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
+            ESP_LOGW(TAG, "Lateral ENGAGE: lock @ (%.0f,%.0f) h=%.2f",
+                     flow.flow_x_i, flow.flow_y_i, tof_m_h);
+        }
+
+        /* 软启动/软退出增益：接管且质量正常 → 升向 1，否则降向 0 */
+        float gain_target = (g_lat_engaged && flow_ok) ? 1.0f : 0.0f;
+        if (g_lat_gain < gain_target)      g_lat_gain += LAT_GAIN_STEP;
+        else if (g_lat_gain > gain_target) g_lat_gain -= LAT_GAIN_STEP;
+        if (g_lat_gain < 0.0f) g_lat_gain = 0.0f;
+        if (g_lat_gain > 1.0f) g_lat_gain = 1.0f;
+
+        /* 延迟的 move_to / move_stop（仅接管后受理） */
         if (g_move_to_pending) {
-            position_set_target(&g_position,
-                                sp->move_to_x, sp->move_to_y,
-                                flow.flow_x_i, flow.flow_y_i);
+            if (g_lat_engaged) {
+                position_set_target(&g_position, sp->move_to_x, sp->move_to_y,
+                                    flow.flow_x_i, flow.flow_y_i);
+            } else {
+                ESP_LOGW(TAG, "move_to ignored: lateral not engaged");
+            }
             g_move_to_pending = false;
         }
         if (g_move_stop_pending) {
@@ -237,19 +288,15 @@ void app_main(void)
             g_move_stop_pending = false;
         }
 
-        /* 水平控制优先级（仅 ALT_HOLD / POS_HOLD 生效）：
-         *   move_to 一次性移动 > Web 速度按钮 > 位置保持(默认，对抗漂移)
-         * API: vel>0=前/右。flow_hold 用 +flow 测量(setpoint=0=静止保持)，
-         * setpoint>0 直接表示前/右意图，无需取反 */
+        /* 水平控制优先级（仅接管后生效）：move_to 一次性 > Web 速度按钮 > 位置保持 */
         float vel_cmd_x = 0.0f, vel_cmd_y = 0.0f;
 
-        if (!alt_mode_h) {
-            /* STABILIZE 等：交还飞手，不做位置保持 */
+        if (!g_lat_engaged) {
+            /* 未接管（起飞/爬升/质量差/非定高模式）：横向交还飞手。
+             * 复位 position + flow_hold，避免积分在禁用期间 windup，
+             * 等增益软启动时突然作用。 */
             if (g_position.active) position_reset(&g_position);
-            if (web_vel) {
-                vel_cmd_x = sp->vel_x * 80.0f;
-                vel_cmd_y = sp->vel_y * 80.0f;
-            }
+            flow_hold_reset(&g_flow_hold);
         } else if (g_position.active && !g_position.hold) {
             /* move_to 进行中：到达后转为在该点持续位置保持 */
             position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
@@ -266,25 +313,22 @@ void app_main(void)
             vel_cmd_x = -(sp->vel_x * 80.0f);
             vel_cmd_y = -(sp->vel_y * 80.0f);
         } else {
-            /* 默认：位置保持，锁定当前点对抗漂移（需光流质量达标才启动锁点） */
-            if (!g_position.active && flow.qual > 50) {
+            /* 默认：位置保持锁点对抗漂移（锁点已在 ENGAGE 时建立；被 move_stop/
+             * web_vel 复位后在此处于当前点重捕获） */
+            if (!g_position.active) {
                 position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
-                ESP_LOGW(TAG, "position hold @ (%.0f, %.0f)",
-                         flow.flow_x_i, flow.flow_y_i);
             }
-            if (g_position.active) {
-                position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
-                vel_cmd_x = g_position.out_vx;
-                vel_cmd_y = g_position.out_vy;
-            }
+            position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
+            vel_cmd_x = g_position.out_vx;
+            vel_cmd_y = g_position.out_vy;
         }
         flow_hold_set_velocity(&g_flow_hold, vel_cmd_x, vel_cmd_y);
 
-        /* 光流速度保持：有新数据时更新（带陀螺补偿） */
+        /* 光流速度保持：接管后且有新数据时更新（带陀螺补偿） */
         flow_hold_set_gyro_comp(&g_flow_hold, sp->flow_kx, sp->flow_ky);
-        if (flow_new == 0) {
+        if (g_lat_engaged && flow_new == 0) {
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
-                             imu.gyro_x, imu.gyro_y, flow.qual, tof_mm * 0.001f);
+                             imu.gyro_x, imu.gyro_y, flow.qual, tof_m_h);
         }
 #else
         g_move_to_pending = false;
@@ -332,6 +376,7 @@ void app_main(void)
             altitude_reset(&g_alt);
             flow_hold_reset(&g_flow_hold);
             position_reset(&g_position);
+            g_lat_engaged = false; g_lat_qual_cnt = 0; g_lat_gain = 0.0f;
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
             if (sp->throttle < 0.05f) {
@@ -343,6 +388,7 @@ void app_main(void)
                 altitude_reset(&g_alt);
                 flow_hold_reset(&g_flow_hold);
                 position_reset(&g_position);
+                g_lat_engaged = false; g_lat_qual_cnt = 0; g_lat_gain = 0.0f;
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 
@@ -364,10 +410,13 @@ void app_main(void)
                 altitude_set_target(&g_alt, sp->takeoff_height, h_now);
                 ESP_LOGW(TAG, "Takeoff: ramp %.2f m -> %.2f m", h_now, sp->takeoff_height);
 #if FLOW_ENABLED
-                /* 起飞即锁定当前点：避免等 qual 达标才锁、锁到已漂走的位置 */
-                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
-                ESP_LOGW(TAG, "Takeoff: position lock @ (%.0f, %.0f)",
-                         flow.flow_x_i, flow.flow_y_i);
+                /* 起飞期不锁点：横向接管状态机会在爬升到目标高度并稳定后，
+                 * 用届时已稳定的光流积分自动接管。离地前贴地光流不可靠，
+                 * 用它锁点正是起飞向一侧倾的根因。 */
+                g_lat_engaged  = false;
+                g_lat_qual_cnt = 0;
+                g_lat_gain     = 0.0f;
+                position_reset(&g_position);
 #endif
                 g_takeoff_pending = false;
             }
@@ -391,11 +440,13 @@ void app_main(void)
                 float target_roll_angle  = sp->roll  * MAX_ANGLE_DEG;
                 float target_pitch_angle = sp->pitch * MAX_ANGLE_DEG;
 
-                /* 光流漂移修正：叠加速度环输出 */
-                if (flow_hold_is_active(&g_flow_hold)) {
-                    target_roll_angle  += g_flow_hold.out_roll_deg;
-                    target_pitch_angle += g_flow_hold.out_pitch_deg;
+                /* 光流漂移修正：叠加速度环输出，乘软启动增益（未接管时为 0） */
+#if FLOW_ENABLED
+                if (g_lat_gain > 0.0f && flow_hold_is_active(&g_flow_hold)) {
+                    target_roll_angle  += g_lat_gain * g_flow_hold.out_roll_deg;
+                    target_pitch_angle += g_lat_gain * g_flow_hold.out_pitch_deg;
                 }
+#endif
 
                 /* 扣除水平修正量，补偿 MPU6050 安装偏移 */
                 float roll_err  = roll  - g_trim_roll;
