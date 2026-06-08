@@ -23,6 +23,7 @@ static setpoint_t g_sp = {
     .move_to_y    = 0.0f,
     .flow_kx      = -2.5f,  /* 陀螺补偿默认值（2026-06 实测标定） */
     .flow_ky      = -2.5f,
+    .flow_imu_scale = 1.0f, /* IMU 互补滤波 scale 默认 1.0（待试飞标定） */
     .pending_cmd  = CMD_NONE,
 };
 
@@ -151,6 +152,12 @@ void commander_parse(const char *json, int len)
             if (cJSON_IsNumber(kx)) sp.flow_kx = (float)kx->valuedouble;
             if (cJSON_IsNumber(ky)) sp.flow_ky = (float)ky->valuedouble;
         }
+        else if (strcmp(item->valuestring, "flow_scale") == 0) {
+            /* IMU 互补滤波 scale 运行时标定：观察遥测 flow.vx vs flow.cx，
+             * vx 漂得远 → 减小；vx 跟不动 → 增大。范围 [0, 100] */
+            cJSON *s = cJSON_GetObjectItem(root, "s");
+            if (cJSON_IsNumber(s)) sp.flow_imu_scale = clamp((float)s->valuedouble, 0.0f, 100.0f);
+        }
     }
 
     /* Per-motor trim */
@@ -164,6 +171,18 @@ void commander_parse(const char *json, int len)
     }
 
     cJSON_Delete(root);
+
+    /* Arming 前置检查：从 DISARMED 切换到任何飞行模式时，油门必须先归零。
+     * 防止上电瞬间残留 mode + 残留 throttle 导致电机突然全转。 */
+    if (sp.mode != MODE_DISARMED && g_sp.mode == MODE_DISARMED) {
+        if (sp.throttle >= ARMING_THROTTLE_THRESHOLD) {
+            ESP_LOGW(TAG, "ARM REFUSED: throttle=%.2f >= %.2f, drop stick first",
+                     sp.throttle, ARMING_THROTTLE_THRESHOLD);
+            sp.mode = MODE_DISARMED;
+        } else {
+            ESP_LOGW(TAG, "ARMED -> %s", commander_mode_name(sp.mode));
+        }
+    }
 
     /* 原子写入：一次性 struct 赋值，最小化竞态窗口 */
     g_sp = sp;
@@ -202,6 +221,7 @@ void commander_reset_setpoint(void)
     };
     safe.flow_kx = g_sp.flow_kx;  /* 保留陀螺补偿标定值，不被失控复位清掉 */
     safe.flow_ky = g_sp.flow_ky;
+    safe.flow_imu_scale = g_sp.flow_imu_scale;  /* IMU 互补滤波 scale 同理保留 */
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");
@@ -211,6 +231,26 @@ bool commander_is_command_timeout(void)
 {
     if (g_last_command_us == 0) return false;  /* 还没收到过命令，不算超时 */
     return (esp_timer_get_time() - g_last_command_us) > COMMAND_TIMEOUT_US;
+}
+
+void commander_set_throttle(float t)
+{
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    g_sp.throttle = t;  /* float 赋值原子；HTTP task 的 parse 用 struct 整赋盖回不冲突 */
+}
+
+void commander_set_flow_imu_scale(float s)
+{
+    if (s < 0.0f)   s = 0.0f;
+    if (s > 100.0f) s = 100.0f;
+    g_sp.flow_imu_scale = s;
+}
+
+int64_t commander_us_since_last_command(void)
+{
+    if (g_last_command_us == 0) return 0;
+    return esp_timer_get_time() - g_last_command_us;
 }
 
 const char *commander_mode_name(flight_mode_t mode)

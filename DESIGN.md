@@ -105,10 +105,12 @@ Commander setpoint → 模式判断:
 
 #### MPU6050 驱动 `drivers/mpu6050.h`
 - I2C0 设备地址 0x68, 400kHz，先 probe 再注册，WHO_AM_I 5 次重试
-- 配置：陀螺仪 ±2000°/s, 加速度计 ±16g, DLPF 256Hz, 采样率 8kHz (gyro) / 1kHz (accel)
+- 配置：陀螺仪 ±2000°/s, 加速度计 ±16g, **DLPF=4 (21Hz accel BW / 20Hz gyro BW)**, 采样率 1kHz
+- DLPF 改动原因：原 256Hz 带宽在 100Hz 主循环 (Nyquist 50Hz) 下电机振动 (60-200Hz) 全部混叠到低频信号 → D 增益不敢调高、Mahony 估计抖。21Hz 截止留 50Hz 余量
 - 上电自动校准：采样 500 次求零偏（陀螺仪 xyz + 加速度 xy）
 - 输出单位：加速度 m/s², 角速度 rad/s, 已扣除零偏
-- **起飞前再校准**：`mpu6050_recalibrate_gyro()`，采样 100 次（1 秒），**同步重校准陀螺仪零偏和加速度计 x/y 零偏**。加速度计以当前放置面为"水平"基准，消除上电面与起飞面不一致导致的姿态偏差。校准后自动调用 `attitude_init()` 复位 Mahony 滤波器（防止旧积分项使用过期零偏导致漂移），约 2 秒内重新收敛到真实姿态
+- **主循环二次 EMA**：accel 在主循环额外加一道软件 EMA（`ACCEL_FILT_ALPHA=0.3`，截止≈5.7Hz），给 Mahony 和 `az_up` 计算用；telemetry 仍显示原始 accel 便于调试
+- **起飞前再校准**：`mpu6050_recalibrate_gyro()`，采样 100 次（1 秒），**同步重校准陀螺仪零偏和加速度计 x/y 零偏**。加速度计以当前放置面为"水平"基准，消除上电面与起飞面不一致导致的姿态偏差。校准后自动调用 `attitude_init()` 复位 Mahony 滤波器，约 2 秒内重新收敛到真实姿态
 
 #### TOF400F 驱动 `drivers/tof400f.h`
 - I2C0 (SDA=GPIO9, SCL=GPIO8, 400kHz)，设备地址 0x29
@@ -161,6 +163,8 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 
 - `pid_init(&pid, kp, ki, kd, output_limit, integral_limit)`
 - `pid_update(&pid, setpoint, measurement, dt)` — 采用 **derivative on measurement** 避免 setpoint kick
+- **D 项 EMA 低通**：`PID_D_FILT_ALPHA=0.5`（截止≈20Hz @100Hz），微分项先过 LPF 再乘 Kd。原因：陀螺噪声 + 电机振动混叠让 D 项变尖刺，必须低通才能用更大 Kd 起阻尼作用
+- **freeze_integral 字段**：外部可设 `pid->freeze_integral = true` 单帧冻结积分。用于地效区（altitude）、光流低质量（flow_hold）等场景的 anti-windup
 - 当前调优参数：
   - roll/pitch rate PID：`Kp=0.25, Ki=0.02, Kd=0.01`，输出限幅 ±0.8，积分限幅 0.15
   - yaw rate PID：`Kp=0.8, Ki=0.05, Kd=0.0`，输出限幅 ±0.5，积分限幅 0.15
@@ -181,37 +185,52 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - `altitude_init()`：初始化 PID（**Kp=0.25, Ki=0.02, Kd=0.0**，输出限幅 ±0.3 油门，积分限幅 0.15）
 - `altitude_capture_target(current_m)`：原地保持，最终目标=当前高度（斜坡不动），定高模式切入时用
 - `altitude_set_target(final_m, current_m)`：从当前高度**斜坡爬升**到 final_m（起飞用），目标按 `ALT_RAMP_RATE=0.3 m/s` 缓升，避免阶跃过冲
-- `altitude_update(current_m, dt)`：推进目标斜坡 → 运行 P+I → 叠加 vz 阻尼，返回油门修正量
+- `altitude_update(current_m, az_up, dt)`：推进目标斜坡 → 运行 P+I → 叠加 vz 阻尼，返回油门修正量
 - `altitude_reset()`：清零积分和 vz（DISARMED 或低油门时调用）
-- **垂直速度阻尼**：`output = (P+I) − ALT_KD_VZ·vz`（`ALT_KD_VZ=0.5`）。`vz` 仅在 TOF 有新值时按真实间隔差分计算（TOF 是 ~10Hz 阶梯数据，对缓存帧求导会爆尖峰），并经 EMA 平滑（`VZ_SMOOTH=0.5`）。这是抑制上下摇摆的关键项
-- 有效油门 = 摇杆基准 + 高度修正（钳位 0.0–1.0）
+- **垂直速度互补滤波**：`vz` 用 IMU 世界系垂直加速度做高频积分预测（每帧）+ TOF 新样本做低频绝对校正（`VZ_FUSE_K=0.2`）。原始 TOF 是 ~10Hz 阶梯数据，对缓存帧求导会爆尖峰；改用互补滤波后 vz 又快又稳。`az_up` 由 main 传入：`az_up = accel_f_z * cos(roll) * cos(pitch) - 9.81f`（accel 用 EMA 滤波后的值，否则电机振动会让 vz 尖刺）
+- **vz 阻尼**：`output = (P+I) − ALT_KD_VZ·vz`（`ALT_KD_VZ=0.5`）。抑制上下摇摆的关键项
+- **地效区禁 I**：`current_m < ALT_GROUND_EFFECT_M (0.30m)` 时设 `pid.freeze_integral = true`。原因：低空桨下气流被地面反弹给 10-20% 额外升力，alt 误差为负 → I 项往负方向积；离开地效瞬间升力突减但 I 项还是负 → 油门被压低 → 飞机掉下来。冻结 I 让飞机离开地效区时 I≈0
+- 有效油门 = 摇杆基准 + 高度修正 + 倾角补偿（钳位 0.0–1.0）
 - 调参背景：原 Kp=0.5/Ki=0.05/无阻尼时大幅上下摇摆（欠阻尼振荡）；降增益 + vz 阻尼后收敛。`vz` 通过遥测 `alt.vz` 暴露用于调试
 
 ### 3.3.2 光流速度保持控制器 `control/flow_hold.h`
 
-在 STABILIZE / ALT_HOLD / POS_HOLD 模式下叠加水平速度修正，主动抵抗漂移，实现垂直起飞。
+在 STABILIZE / ALT_HOLD / POS_HOLD 模式下叠加水平速度修正，主动抵抗漂移，实现垂直起飞。**架构升级**：内部状态从单一"flow 速度"升级为"IMU+flow 互补滤波后的 vx_est/vy_est"，PID 频率从 50Hz（flow 帧率）提升到 100Hz（主循环频率）。
 
-- `flow_hold_t`：封装两个速度 PID + 输出修正角
-- `flow_hold_init()`：初始化 PID（Kp=0.4, Ki=0.06, Kd=0.0，输出限幅 ±8°，积分限幅 6°）。Kp 取大值因光流信号幅度小（实测 30cm 平移 comp<10），否则纠偏角小到拦不住漂移
+- `flow_hold_t`：封装两个速度 PID + 输出修正角 + IMU 互补滤波状态
+- `flow_hold_init()`：初始化 PID（Kp=0.4, Ki=0.06, Kd=0.0，输出限幅 ±8°，积分限幅 6°）。Kp 取大值因光流信号幅度小，否则纠偏角小到拦不住漂移
 - `flow_hold_set_velocity(vx, vy)`：设置速度指令（flow 原始单位），0=静止保持，非零=主动移动
-- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿系数（运行时标定，实测默认 -2.5/-2.5）
-- `flow_hold_update(flow_x, flow_y, gyro_x, gyro_y, qual, height_m)`：有新光流数据时更新
-  - **陀螺补偿（关键）**：`flow_x_comp = flow_x − kx·gyro_y`、`flow_y_comp = flow_y − ky·gyro_x`，扣除姿态变化（旋转）污染的光流，只留平移分量。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、定点持续漂走。补偿后单帧值经遥测 `flow.cx/cy` 暴露用于标定（缓慢匀速倾斜调 K 使其≈0，最优 K≈−2.5，步长 0.5）
-  - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=1.0`）：裸光流噪声大，先 EMA 平滑；死区清零静止小信号防"追假速度"漂移（参考 LiteWing/iNav）。死区前平滑值经遥测 `flow.cx/cy` 暴露用于标定
-  - 质量门控：`qual > 50` 才有效
-  - 已知瓶颈：光流信号幅度偏小（慢速漂移 comp 极小），需大 Kp 放大；若仍不足，后续考虑高度尺度（`v = flow·height·常数`）或 IMU 速度融合
+- `flow_hold_set_gyro_comp(kx, ky)`：陀螺补偿系数（运行时标定，实测默认 -2.5/-2.5，通过 `flow_comp` web 命令调）
+- `flow_hold_set_imu_scale(s)`：IMU 加速度 → flow 单位 的转换系数（默认 1.0，通过 `flow_scale` web 命令调，需试飞标定）
+
+**控制流拆分为 predict + update 两个调用点**：
+
+- `flow_hold_predict(ax_world, ay_world, dt)` — **每帧 100Hz 调用**
+  - IMU 加速度积分：`vx_est = (vx_est + imu_scale * ax_world * dt) * IMU_LEAK`
+  - `IMU_LEAK = 0.999` 慢衰减防 accel 偏置积爆（τ≈10s）
+  - 跑 PID 算 out_pitch_deg / out_roll_deg；低 `quality_gain` 时设 `freeze_integral` 防噪声 windup
+  - PID 输出按 `quality_gain` 加权（低 qual 时小纠偏，软介入）
+  - `ax_world/ay_world` 由 main 传入；小角度悬停下用机体系 `accel_f_x/y` 近似（误差 < 3%）
+
+- `flow_hold_update(flow_x, flow_y, gyro_x, gyro_y, qual, height_m)` — **仅在新光流帧时调用（~50Hz）**
+  - **陀螺补偿**：`fx = flow_x − kx·gyro_y`、`fy = flow_y − ky·gyro_x`，扣除姿态变化引起的旋转光流污染。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、持续漂走。补偿后平滑值经遥测 `flow.cx/cy` 暴露用于标定
+  - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=1.0`）
+  - **互补滤波校正**：`vx_est += K * (fxd − vx_est)`，其中 `K = FLOW_CORRECT_K(0.3) * quality_gain` —— 低质量时少信任 flow，高质量时强力拉回
+  - **连续 quality 权重**（取代旧版 binary 阈值）：`qual ≤ 30 → 0`；`qual ≥ 80 → 1`；中间线性插值。EMA 平滑后存为 `quality_gain`。让低 qual 也按比例参与，避免起飞期"qual 没起来 → 完全无位置控制 → 漂走才锁"的位置开窗问题
   - 高度门控：0.04m < height < 3.0m
-  - 用 `esp_timer_get_time()` 计算真实 dt（光流帧率低于 100Hz）
-  - 质量不满足时修正指数衰减（×0.95）
-- `flow_hold_reset()`：DISARMED / 低油门时清零 PID 和输出
+
+- `flow_hold_reset()`：DISARMED / 低油门时清零 PID + 输出 + `vx_est/vy_est`
 - `flow_hold_is_active()`：`quality_gain > 0.01` 时返回 true
-- 修正叠加在摇杆目标角度上（±30° + ±5°），不影响飞行员操控权限
-- 速度环的积分项隐含位置保持效果（∫速度误差 = 位置误差）
+- 修正叠加在摇杆目标角度上（±30° + ±8°），不影响飞行员操控权限
 
 ```
-光流 flow_x/flow_y (速度测量，setpoint 可设为非零)
-    → 速度 PID → 修正角 ±5°
-    → 叠加到 stick 目标角度 → Angle P → Rate PID → Mixer → 电机
+每帧 (100Hz):
+  IMU accel → predict: vx_est = vx_est + imu_scale·a·dt
+                       → PID(setpoint, vx_est) → out_pitch_deg
+有新 flow 帧 (~50Hz):
+  flow_x → gyro_comp + EMA + 死区 → fxd
+        → update: vx_est = vx_est + K·q_gain·(fxd − vx_est)
+  → quality_gain 平滑 (qual 30-80 → 0-1)
 ```
 
 ### 3.3.3 水平移动控制（Web 按钮 / P4 API）
@@ -281,7 +300,7 @@ P4 检测到垃圾后发送相对位置偏移指令，飞控通过光流积分�
 | 水平速度环 (PID) | 100Hz | 光流速度 (setpoint=0) | 姿态修正角 ✅ 已实现 |
 | 水平位置环 (PID) | 100Hz | 期望位置 - 光流积分 | 期望速度 |
 
-### 3.4 混控器 `control/mixer.h`
+### 3.4 混控器 `control/mixer.h` + 倾角补偿
 
 X字型四轴混控：
 
@@ -300,6 +319,20 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   1. 每个电机输出钳位到 `[MOTOR_MIN, 1.0]`（MOTOR_MIN = 0.05）
   2. 若 max(motor) > 1.0，等比例缩放使最大值为 1.0
 - 输出最终钳位 0.0–1.0
+
+**倾角补偿油门**（在 main.c mixer_apply 之前应用）：
+```
+effective_throttle /= cos(roll_act) * cos(pitch_act)   // roll_act/pitch_act 已扣除 trim
+                  钳位 max 1.5x（cos<0.667 ≈ 48°，超过失控）
+```
+飞机倾斜 θ 时垂直推力 = throttle·cos(θ)，不补偿就会"银行 15° → 丢 3.4% 升力 → alt PID 加油门补 → 摆正瞬间过冲"。倾角是真实倾角（扣 trim 后），cos 钳位防极端姿态除零。
+
+**ESC spool-up**（takeoff 后 200ms，main.c motor_set 之前覆盖）：
+```
+if (now < g_spoolup_end_us):
+    m[i] = MOTOR_IDLE_THROTTLE (0.05) for all i
+```
+4 个电调收到非零 PWM 后 sync 时间差 30-80ms（KV 误差 + stator 对位），起飞瞬间推力不平衡 → 飞机倾几度。先让所有电机 idle 200ms 等 sync 完成。控制环正常更新（防冷启动错位），只覆盖最终 motor 输出。
 
 ### 3.5 电机驱动 `drivers/motor.h`
 
@@ -362,6 +395,8 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 {"cmd": "move_to", "x": 0.5, "y": -0.3}  // P4 位置偏移指令（光流积分单位）
 {"cmd": "move_stop"}         // 停止所有水平移动
 {"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞（高度0.2~2.0m，油门0.25~0.6）
+{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}   // 光流陀螺补偿系数（运行时标定）
+{"cmd": "flow_scale", "s": 1.0}                // IMU+光流互补滤波 scale（运行时标定，0~100）
 ```
 
 #### Web 前端 `web_page.h`
@@ -392,35 +427,69 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 
 #### Commander `commander.h/.c`
 - 解析 WebSocket JSON 遥控指令（cJSON）
-- 维护全局 `setpoint_t` 结构体（throttle, roll, pitch, yaw, mode, motor[], motor_active, mtrim[]）
+- 维护全局 `setpoint_t` 结构体（throttle, roll, pitch, yaw, vel_x/y, mode, motor[], motor_active, mtrim[], flow_kx/ky, flow_imu_scale, takeoff_height/throttle, pending_cmd）
 - 值域钳位，字符串模式名映射到枚举
 - 支持手动单电机控制（`motor[]` 数组，用于调试/测试）
-  - `motor_active` 仅当 motor[] 任一值 > 0 时置 true，否则飞行模式正常接管
 - 特殊命令（延迟到主循环执行，避免阻塞 HTTP Server 任务）：
   - `CMD_CALIBRATE` — 四路电调油门校准
   - `CMD_GYRO_CALIB` — 陀螺仪零偏再校准
   - `CMD_LEVEL_TRIM` — 捕获当前姿态角作为水平零位
   - `CMD_RESET_TRIM` — 重置水平修正量为零
   - `CMD_CALIBRATE_MOTOR` — 单电机电调校准（带 `motor_index` 参数）
-  - `CMD_TAKEOFF` — 自动起飞（设定目标高度，切入 ALT_HOLD，设定基准油门）
-- 命令通过 `pending_cmd` 字段延迟到主循环执行，确保阻塞操作（校准）不冻结 HTTP/WebSocket 通信
+  - `CMD_TAKEOFF` — 自动起飞（设定目标高度，切入 ALT_HOLD，注入悬停油门前馈，开 ESC 同步窗口）
+  - `CMD_MOVE_TO` / `CMD_MOVE_STOP` — 水平移动控制
+- `flow_comp` 和 `flow_scale` 命令直接修改 setpoint 字段，不走 pending_cmd（非阻塞）
 - **原子更新**：`commander_parse()` 先将当前 `g_sp` 复制到局部变量，在局部变量上修改，最后一次性 struct 赋值写回 `g_sp`，将竞态窗口缩小为单条 memcpy
-- **命令超时**：`commander_is_command_timeout()` 记录最后一次收到有效 WebSocket 命令的时间戳（`esp_timer_get_time()`），若超过 500ms 未收到任何命令 → 主循环强制调用 `commander_reset_setpoint()` 回到 DISARMED
-- **断连复位**：`commander_reset_setpoint()` 将 `g_sp` 重置为安全状态（DISARMED, 油门=0, motor_active=false），同时清零时间戳防止循环触发超时
+- **Arming 前置检查**（`commander_parse` 内）：从 DISARMED 切到任何飞行模式时，若 `throttle >= ARMING_THROTTLE_THRESHOLD (0.05)` 拒绝切换并强制保持 DISARMED，log "ARM REFUSED"。防止上电瞬间残留 mode + 残留 throttle 导致电机突然全转
+- `commander_set_throttle(float)`：反向写 g_sp.throttle（main 起飞时把学习的悬停油门灌进 setpoint 作前馈）
+- `commander_us_since_last_command()`：返回距上次收到有效命令的微秒数，驱动 main 的分级 failsafe FSM
+- **断连复位**：`commander_reset_setpoint()` 将 g_sp 重置为安全状态（DISARMED, 油门=0），但**保留** `flow_kx/ky` 和 `flow_imu_scale` 标定值不被清掉
 
 | 模式 | 描述 | 当前实现 | 需要传感器 |
 |------|------|----------|------------|
-| **DISARMED** | 锁定，电机停止 | 电机停止，PID 积分清零 | — |
-| **STABILIZE** | 自稳模式（Angle + Rate） | 角度环 P + 角速率环 PID + 混控 | MPU6050 |
-| **ALT_HOLD** | 定高（含位置保持） | 自稳 + 高度环 PID（TOF，目标斜坡）+ 位置保持环（光流锁定水平位置抗漂移），切入时自动捕获目标高度 | MPU6050 + TOF400F + PV3901L1 |
-| **POS_HOLD** | 定点悬停 | 自稳 + 高度环 + 位置保持 + 光流速度环，**不再清零光流积分**（位置环用绝对积分做相对锁定，跨模式连续保持） | MPU6050 + TOF400F + PV3901L1 |
+| **DISARMED** | 锁定，电机停止 | 电机停止，PID 积分清零，spool-up 窗口清零，**触发 NVS 保存悬停油门** | — |
+| **STABILIZE** | 自稳模式（Angle + Rate） | 角度环 P + 角速率环 PID + 倾角补偿油门 + 混控 | MPU6050 |
+| **ALT_HOLD** | 定高（含位置保持） | 自稳 + 高度环 PID（TOF，目标斜坡，地效区禁I）+ 位置保持环（光流锁定水平位置抗漂移） | MPU6050 + TOF400F + PV3901L1 |
+| **POS_HOLD** | 定点悬停 | 自稳 + 高度环 + 位置保持 + 光流速度环（IMU+flow 互补，软启动） | MPU6050 + TOF400F + PV3901L1 |
+
+#### 分级 Failsafe FSM（main.c 内）
+
+`commander_us_since_last_command()` 驱动状态机，旧的"500ms → DISARMED = 自由落体"已被替代：
+
+| 状态 | 触发条件 | 行为 |
+|------|----------|------|
+| `FS_NORMAL` | < 0.5s | 正常控制 |
+| `FS_HOLD` | 0.5-1.0s | roll/pitch/yaw 归零（保持当前模式 + 油门 → 悬停） |
+| `FS_DESCEND` | 1.0-5.0s | 强制 STABILIZE + 油门按 `FS_DESCEND_RATE=0.05/s` 斜坡降 |
+| `FS_LAND` | ≥ 5.0s | DISARMED 熄火 + `commander_reset_setpoint()` 强制重 arm |
+
+任意阶段链路恢复 → 立即退出 failsafe。当前状态通过遥测 `failsafe` 字段暴露。
 
 ### 3.9 系统管理
 
-- **参数系统**：运行时调参（PID参数可通过WiFi修改，持久化到NVS）— 待实现
-- **日志系统**：分级日志（ERROR/WARN/INFO/DEBUG）
-- **看门狗**：任务看门狗 + 硬件看门狗防死机 — 待实现
-- **电池监测**：ADC 读取电池电压，低电量告警 — 待实现
+#### 参数系统 `system/params.h`
+- 启动时 `params_init()` 读 NVS（namespace `drone`），找到则用学习值，找不到/越界则用默认
+- 持久化字段（float → uint32_t bit-cast 存储）：
+  - **`hover_throttle`**（key `hover_thr`）：范围 `[0.20, 0.65]`，默认 0.40，存盘阈值 1%
+  - **`flow_imu_scale`**（key `flow_scale`）：范围 `[0, 100]`，默认 1.0，存盘阈值 0.05
+- API：
+  - `params_get_hover_throttle()`：返回当前学习值，main.c 在 takeoff 时调 `commander_set_throttle()` 灌进 g_sp.throttle 作前馈
+  - `params_update_hover_throttle(actual)`：慢速 EMA 学习，`α=0.001` → 时间常数 ~10s。main.c 在严格稳态时调用：alt_mode + 高度 > 30cm + |target-current| < 5cm + |vz| < 0.1 + 持续 1s
+  - `params_get_flow_imu_scale()` / `params_set_flow_imu_scale(s)`：直接 get/set。启动时 main 调 `commander_set_flow_imu_scale(params_get_flow_imu_scale())` 把 NVS 值灌进 g_sp；主循环每帧 `params_set_flow_imu_scale(sp->flow_imu_scale)` 把 web 端的修改同步回 params
+- `params_save()`：DISARMED 切入瞬间调用，独立检查两个字段的脏标记；只有真正变化超阈值才写 flash（减少 wear），变化的字段会单独写但同一次 commit
+- 遥测 `flow.s` 字段把当前 imu_scale 广播给前端 UI（用户未在输入时同步显示），让重启后能立刻看到 NVS 加载的值
+
+#### 看门狗
+- **任务看门狗 (TWDT)**：主循环注册，`TWDT_TIMEOUT_MS=1000`，超时触发 panic + 重启
+- 校准类阻塞命令（CALIBRATE/CALIBRATE_MOTOR/GYRO_CALIB，最长 ~12s）期间 `esp_task_wdt_delete(NULL)` 临时摘除，校准完 `add(NULL)` 重新注册
+- 校准恢复后同时复位 `prev_us` 和 `next_wake`，避免下一轮 dt 算成校准时长
+
+#### 日志系统
+- 分级日志（ERROR/WARN/INFO/DEBUG）通过 `ESP_LOG*`
+- 关键事件（ARM/DISARM, failsafe 切换, takeoff 参数, NVS 写入）用 `ESP_LOGW` 醒目高亮
+
+#### 电池监测
+- ADC 读取电池电压、低电量告警 — **硬件限制不支持**（电池/电源板未引出分压点）
 
 ---
 
@@ -456,8 +525,9 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 │   ├── estimation/             # 姿态估计
 │   │   ├── CMakeLists.txt
 │   │   └── attitude.h / .c     # Mahony 互补滤波 ✅
-│   └── system/                 # 系统管理（待实现）
-│       └── params.h / .c       # 参数存储 (NVS)
+│   └── system/                 # 系统管理 ✅
+│       ├── CMakeLists.txt
+│       └── params.h / .c       # NVS 持久化（悬停油门学习）✅
 └── docs/
     └── (外设文档/数据手册)
 ```
@@ -479,37 +549,50 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - [x] Mahony 姿态估计（100Hz 集成）
 - [x] PID 控制器 + 电机混控（rate mode）
 - [x] 角度外环自稳（Angle + Rate 串级，STABILIZE 模式）
+- [x] PID D 项 EMA LPF（截止 20Hz）+ `freeze_integral` 外部控制
+- [x] 主循环实测 dt + `vTaskDelayUntil` 锁周期（取代固定 0.01f）
 - [ ] 1kHz 稳定器主循环（从 100Hz 轮询重构为定时中断）
-- [ ] 基础自稳起飞测试
 
 ### Phase 3：高级飞行模式
-- [x] 定高模式（TOF PID 高度环）
-- [x] 光流速度保持（速度环，所有模式生效）
+- [x] 定高模式（TOF PID 高度环 + vz IMU/TOF 互补滤波 + 目标斜坡 + 地效区禁 I）
+- [x] 光流速度保持（连续 quality 权重 + IMU/flow 互补滤波 + 陀螺补偿）
 - [x] WiFi 遥控 + 遥测（WebSocket 已实现）
-- [x] 失控保护 + 安全逻辑（命令超时 500ms → DISARMED，断连 → DISARMED，前端重连安全复位，motor_active 路径增加安全门禁）
+- [x] 失控保护：TWDT(1s) + 分级 failsafe(hold/descend/land) + arming 前置(throttle<5%)
+- [x] IMU 抗振动：MPU6050 DLPF 21Hz + accel 二次 EMA + D 项 LPF
+- [x] 起飞稳定性：ESC 同步 idle 200ms + 倾角补偿油门 + 悬停油门 NVS 学习
 
 ### Phase 4：调优与完善
-- [ ] PID 参数整定（已从初始值调整，仍需试飞确认）
-- [ ] 传感器融合优化
-- [ ] 电池监测（ADC）
-- [ ] 参数系统 + NVS 持久化
+- [x] 悬停油门 NVS 持久化（自动学习）
+- [x] 光流 IMU scale NVS 持久化（用户标定，web UI 设置）
+- [ ] flow_scale 实际试飞标定（默认 1.0 几乎肯定不准）
+- [ ] PID 参数运行时调整 + 完整 NVS 持久化
+- [ ] 传感器融合进一步优化（EKF？）
+- [ ] 磁力计（消除 yaw 漂）
+- [ ] 电池监测（ADC）— 硬件不支持
 
 ---
 
 ## 6. 安全设计原则
 
 1. **上锁/解锁机制**：上电默认 DISARMED，需显式切换模式解锁
-2. **油门死区**：throttle < 5% → 停转 + PID 复位，防止地面角度环意外驱动电机。`motor_active` 手动电机控制路径同样受此约束
-3. **MOTOR_MIN 地板**：mixer 输出不低于 5%，确保电机不意外停转，但采用 floor-clip 而非 shift-up（避免零油门安全隐患）
-4. **失控保护（命令超时）**：超过 500ms 未收到 WebSocket 命令 → `commander_is_command_timeout()` 返回 true → 主循环调用 `commander_reset_setpoint()` 强制 DISARMED ✅
-5. **断连保护**：所有 WebSocket 客户端断开（`g_ws_count == 0`）→ `http_server` 触发 `ws_disconnect_cb` → `commander_reset_setpoint()` 强制 DISARMED ✅
-6. **前端重连安全**：WebSocket 重连时前端复位所有控制变量（throttle/roll/pitch/yaw → 0, mode → disarmed, motorPWM → 1000μs），UI 同步复位，发送 DISARMED 到 ESP ✅
-7. **setpoint 原子更新**：`commander_parse()` 先在局部变量构建完整 setpoint，再一次 struct 赋值写入 `g_sp`，避免逐字段修改被主循环读到中间态 ✅
-8. **低电量保护**：电池电压 < 阈值 → LED告警 → 自动降落 — 待实现
-9. **看门狗**：任一关键任务卡死 → 系统复位 — 待实现
-10. **传感器失效检测**：I2C 通信失败重试3次 → 切换降落模式 — 待实现
-11. **电机输出限幅**：PWM 范围硬限制，mixer 输出钳位 0.0–1.0
-12. **命令延迟执行**：校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 HTTP/WebSocket 通信任务
+2. **Arming 前置**：从 DISARMED 切到任何飞行模式时，throttle 必须 < 5%，否则拒绝（防上电残留 throttle + 模式残留 → 电机突然全转）✅
+3. **油门死区**：throttle < 5% → 停转 + PID 复位 + spool-up 窗口清零，防止地面角度环意外驱动电机。`motor_active` 手动电机控制路径同样受此约束 ✅
+4. **MOTOR_MIN 地板**：mixer 输出不低于 5%，确保电机不意外停转，但采用 floor-clip 而非 shift-up（避免零油门安全隐患）✅
+5. **任务看门狗 (TWDT)**：主循环注册 1s 超时，I2C/UART 卡死自动 panic + 重启；校准期间临时摘除并复位时间戳 ✅
+6. **分级 Failsafe**（取代旧的"500ms → DISARMED = 自由落体"）：HOLD (0.5s) → DESCEND (1s, 油门 0.05/s 斜坡降) → LAND (5s, DISARMED + 强制 re-arm) ✅
+7. **断连保护**：所有 WebSocket 客户端断开 → `commander_reset_setpoint()` 强制 DISARMED（保留 flow_kx/ky 和 flow_imu_scale 标定）✅
+8. **前端重连安全**：WebSocket 重连时前端复位所有控制变量，UI 同步复位，发送 DISARMED 到 ESP ✅
+9. **setpoint 原子更新**：`commander_parse()` 先在局部变量构建完整 setpoint，再一次 struct 赋值写入 `g_sp`，避免逐字段修改被主循环读到中间态 ✅
+10. **ESC 同步 spool-up**：takeoff 后 200ms 强制所有电机 idle 5%，等 4 个电调完全 sync（避免起飞瞬间推力不平衡导致倾翻）✅
+11. **倾角补偿油门**：飞机倾斜时按 1/(cos roll · cos pitch) 提升油门保持升力（clamp 1.5x），避免银行→掉高→alt PID 过冲 ✅
+12. **地效区禁 I**：高度 < 0.3 m 时 alt PID 不积分，避免离开地效瞬间残留负积分把油门拉死 ✅
+13. **悬停油门 NVS 学习**：起飞用学习值作前馈，alt PID 只需填差量，不必从 0 慢慢扛偏差 ✅
+14. **IMU+光流互补滤波**：水平速度估计有高频快通道（IMU 加速度积分）和低频绝对通道（光流），起飞期 flow 还没准备好也有可靠速度反馈 ✅
+15. **光流软启动**：quality 30-80 线性权重渐变（取代旧版 binary 50 切断），起飞期 qual 低也按比例介入避免位置开窗 ✅
+16. **电机输出限幅**：PWM 范围硬限制，mixer 输出钳位 0.0–1.0 ✅
+17. **命令延迟执行**：校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 HTTP/WebSocket 通信任务 ✅
+18. **传感器失效检测**：I2C 通信失败重试3次 → 切换降落模式 — 待实现
+19. **低电量保护**：硬件限制不支持
 
 ---
 

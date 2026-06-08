@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -7,9 +9,11 @@ extern "C" {
 typedef struct {
     float kp, ki, kd;
     float integral;
-    float prev_error;
+    float prev_meas;      /* 上次测量值（derivative-on-measurement） */
+    float d_filt;         /* D 项 EMA 平滑后的值 */
     float output_limit;   /* 输出绝对值上限 */
     float integral_limit; /* 积分项上限（防饱和） */
+    bool  freeze_integral; /* true=本帧不积分（用于地效区抗 windup 等外部场景） */
 } pid_t;
 
 void pid_init(pid_t *pid, float kp, float ki, float kd,

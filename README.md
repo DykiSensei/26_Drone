@@ -41,28 +41,30 @@
 ## 控制链路
 
 ```
-MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
+MPU6050 → DLPF 21Hz + accel EMA → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
                             ↓
 摇杆 → 目标倾角 ±30° + 光流修正 ±8° → Angle P → 目标角速率
                             ↓
-                    Rate PID → 力矩输出
+                    Rate PID (D项LPF) → 力矩输出
                             ↓
-              Mixer (X-quad) → 4×PWM → 电机
+              Mixer (X-quad) → ÷cos(roll)·cos(pitch) 倾角补偿 → 4×PWM → 电机
 ```
 
-定高模式：摇杆油门 + 高度 PID（含 vz 垂直速度阻尼、起飞目标斜坡）→ 有效油门
-悬停模式：光流速度保持 (setpoint=0，含陀螺补偿 + 死区) → 姿态修正角 ±8°，叠加到目标倾角；位置环锁定水平位置抗漂移
+定高模式：摇杆油门 + 高度 PID（含 vz 互补滤波、起飞目标斜坡、地效区禁I）→ 有效油门
+悬停模式：光流速度保持（连续 quality 权重 + IMU 互补滤波 + 陀螺补偿 + 死区）→ 姿态修正角 ±8°；位置环锁定水平位置抗漂移
+起飞：NVS 学习的悬停油门作前馈 + 200ms ESC 同步 idle 阶段 + 目标高度斜坡（0.3 m/s）+ 地效区禁 I
 
 ## 软件架构
 
 ```
 26_Drone/
-├── main/main.c                    # 入口 — 初始化 + 100Hz 主循环
+├── main/main.c                    # 入口 — 初始化 + 100Hz 主循环（实测dt + vTaskDelayUntil 锁周期）
 ├── components/
 │   ├── drivers/                   # 硬件驱动 (I2C, MPU6050, TOF400F, PV3901L1, Motor)
 │   ├── estimation/                # Mahony AHRS 姿态估计
 │   ├── control/                   # 飞行控制 (Commander, PID, Mixer, Altitude, Flow_Hold, Position)
-│   └── communication/             # WiFi AP + HTTP/WebSocket + 嵌入式 Web 前端
+│   ├── communication/             # WiFi AP + HTTP/WebSocket + 嵌入式 Web 前端
+│   └── system/                    # NVS 参数持久化（悬停油门学习）
 └── build/                         # 构建产物
 ```
 
@@ -133,27 +135,37 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 {"cmd": "level_trim"}                     // 捕获当前姿态角作为水平零位（gyro_calib 后等 2 秒再执行）
 {"cmd": "reset_trim"}                     // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
-{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
+{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞（带 ESC 200ms 同步 + 悬停油门前馈）
 {"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}             // 光流陀螺补偿系数运行时标定
+{"cmd": "flow_scale", "s": 1.0}                          // IMU 互补滤波 scale 运行时标定（观察 flow.vx vs flow.cx 调）
 ```
 
-> **起飞前校准流程**：放在起飞面 → `gyro_calib` → 等 2 秒 → `level_trim` → 解锁起飞
+> **起飞前校准流程**：放在起飞面 → `gyro_calib` → 等 2 秒 → `level_trim` → 油门拉到底 → 解锁起飞
+>
+> **Arming 前置**：从 DISARMED 切到其他模式时，油门必须 < 5%，否则切换被拒（log "ARM REFUSED"）
 
 ### 遥测数据（ESP → 浏览器，100Hz）
 
 ```json
 {
-  "accel": [x, y, z],           // 加速度 m/s²
+  "accel": [x, y, z],           // 加速度 m/s²（未滤波，调试用；Mahony 用 EMA 后的值）
   "gyro": [x, y, z],            // 角速度 rad/s
   "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},  // 姿态角 °
   "tof": 1234,                  // TOF 距离 mm
   "alt": {"target": 1.20, "out": 0.015, "vz": 0.0},  // 定高目标/输出/垂直速度
-  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0, "cx": 0.0, "cy": 0.0},  // 光流(x/y积分, cr/cp修正角, cx/cy补偿后单帧)
+  "flow": {                     // 光流综合数据
+    "x": 0.0, "y": 0.0,         // 积分位移（dead-reckoning）
+    "qual": 0,                  // 原始 quality 0-255
+    "cr": 0.0, "cp": 0.0,       // out_roll_deg / out_pitch_deg（PID 输出修正角）
+    "cx": 0.0, "cy": 0.0,       // 陀螺补偿+EMA 平滑后的单帧光流（标定用）
+    "vx": 0.0, "vy": 0.0        // IMU+flow 互补滤波后的速度估计（控制器实际用的反馈）
+  },
   "motor": [0.0, 0.0, 0.0, 0.0],  // 电机 0-1
   "mtrim": [0.0, 0.0, 0.0, 0.0],  // 逐电机微调
   "pid": [0.0, 0.0, 0.0],       // PID 输出
   "trim": {"roll": 0.0, "pitch": 0.0},  // 水平修正量 °
-  "mode": "stabilize"
+  "mode": "stabilize",
+  "failsafe": "normal"          // 分级 failsafe 状态: normal/hold/descend/land
 }
 ```
 
@@ -169,17 +181,30 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 | Flow Velocity | 0.4 | 0.06 | 0.0 | ±8° | 6° |
 | Position | 0.8 | 0.02 | 0.0 | ±80 flow | 30 |
 
-> Altitude 另含 **vz 垂直速度阻尼**（KD_VZ=0.5，IMU/TOF 互补滤波）+ **起飞目标斜坡**（0.3 m/s）。
-> Flow Velocity 另含 **陀螺补偿**（Kx=Ky=−2.5）+ **EMA 平滑/死区**（1.0）。光流信号幅度偏小，Flow Kp 取大值放大纠偏。
+> **PID 通用**: D 项 derivative-on-measurement + EMA LPF（α=0.5，截止≈20Hz），可外部 `freeze_integral` 冻结积分。
+> **Altitude**: vz 垂直速度阻尼（KD_VZ=0.5，IMU 加速度积分 + TOF 修正 K=0.2 互补滤波）+ 起飞目标斜坡（0.3 m/s）+ 地效区禁 I（高度 < 0.3 m）。
+> **Flow Velocity**: 陀螺补偿（Kx=Ky=−2.5，可 `flow_comp` 调）+ EMA 平滑（α=0.3） + 死区（1.0）+ 连续 quality 权重（30-80 线性）+ IMU 互补滤波（scale 可 `flow_scale` 调，默认 1.0，慢衰减 τ≈10s）。
+> **Throttle**: 倾角补偿 `÷ cos(roll)·cos(pitch)`（clamp 1.5x） + 起飞 ESC 同步 idle 200ms + 悬停油门 NVS 学习（α=0.001，差距>1% 才写 flash）。
 
 ## 安全设计
 
-- **上锁/解锁**：上电默认 DISARMED，需手动切换模式解锁
-- **油门死区**：throttle < 5% → 停转 + 全 PID 复位，防止地面角度环翘机
+- **上锁/解锁**：上电默认 DISARMED，需手动切换模式解锁；**arming 前置**——从 DISARMED 切到其他模式时油门必须 < 5%，否则强制保持 DISARMED 并 log "ARM REFUSED"
+- **任务看门狗 (TWDT)**：主循环注册 1s 超时，I2C/UART 卡死自动 panic + 重启；校准类阻塞命令期间临时摘除，校准完重新注册（同时复位 dt 时间戳）
+- **分级 Failsafe**（取代旧的 500ms→DISARMED 自由落体）：
+  - 0.5s 无命令 → **HOLD**：roll/pitch/yaw 归零（保持姿态 + 当前油门 + 模式 → 悬停）
+  - 1.0s → **DESCEND**：强制 STABILIZE + 油门按 0.05/s 斜坡降
+  - 5.0s → **LAND**：DISARMED 熄火 + `commander_reset_setpoint()` 强制重新走 arming 流程
+  - 任意阶段链路恢复 → 立即退出 failsafe
+- **油门死区**：throttle < 5% → 停转 + 全 PID 复位 + spool-up 窗口清零，防止地面角度环翘机
 - **MOTOR_MIN 地板**：mixer 输出不低于 5%（floor-clip，非 shift-up）
+- **倾角补偿油门**：飞机倾斜时按 `1/cos(roll)·cos(pitch)` 提升油门保持升力，避免银行→掉高度→alt PID 过冲
+- **ESC 同步 spool-up**：takeoff 后 200ms 强制所有电机 idle 5%，等 4 个电调完全 sync（避免起飞瞬间推力不平衡导致倾翻）
 - **命令延迟执行**：ESC 校准、陀螺仪校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 WebSocket 通信
-- **光流质量门控**：qual > 50 + 0.04m < height < 3.0m 才生效，否则指数衰减修正
+- **光流质量软启动**：qual 30-80 之间线性权重渐变（旧版 50 binary 切断），起飞期 qual 低也按比例介入避免"位置开窗"；qual 低时 PID 冻结积分防噪声 windup
 - **光流陀螺补偿**：扣除姿态变化引起的旋转光流污染（`flow_comp = flow − K·gyro`，实测 Kx=Ky=−2.5），否则飞行中纠偏反向、持续漂移
+- **IMU+光流互补滤波**：水平速度估计 = IMU 加速度积分（100Hz 快通道）+ 光流校正（50Hz 绝对参考），起飞期 flow 还没准备好也有可靠速度反馈
+- **地效区禁 I**：高度 < 0.3 m 时 alt PID 不积分，避免离开地效瞬间残留负积分把油门拉死
+- **悬停油门学习**：起飞用 NVS 中学习的悬停油门作前馈，alt PID 只填差量，不必从 0 慢慢积；稳定悬停时持续学习；DISARMED 时存 flash
 - **起飞保护**：目标高度斜坡缓升防过冲坠机；起飞即锁定水平位置抗漂移；命令竞态修复（takeoff 不被后续 stick 冲掉）
 
 ## 开发状态
@@ -199,11 +224,17 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 - [x] 光流传感器重新启用（`FLOW_ENABLED=1`）
 - [x] 高度环 vz 速度阻尼（IMU/TOF 互补）+ 起飞目标斜坡（治理上下摇摆/起飞过冲坠机）
 - [x] 光流陀螺补偿（旋转-平移解耦）+ 速度 EMA/死区 + 起飞位置锁位
-- [ ] 光流定点最终调优（光流信号偏弱，速度环增益调试中）
+- [x] 失控保护：任务看门狗 TWDT（1s 超时）+ 分级 failsafe（hold/descend/land）+ arming 前置（油门必须先归零）
+- [x] PID 升级：D 项 EMA LPF + 实测 dt + `vTaskDelayUntil` 锁周期 + `freeze_integral`（地效区/低质量场景）
+- [x] MPU6050 DLPF 21Hz + accel 二次 EMA（抗电机振动）
+- [x] 倾角补偿油门 + ESC 同步 idle 200ms（起飞稳）
+- [x] 地效区禁 alt I 项（< 0.3 m 不积分，离开地效不掉高度）
+- [x] 悬停油门 + IMU 互补滤波 scale NVS 持久化（DISARMED 时按字段独立脏标记存 flash）
+- [x] 光流软启动（连续 quality 权重 30-80）+ IMU/光流速度互补滤波（100Hz 高频通道）
+- [ ] 光流 imu_scale 试飞标定（默认 1.0，通过 web UI 或 `flow_scale` 命令调，DISARMED 时存 NVS）
 - [ ] 1kHz 稳定器主循环重构
-- [ ] 失控保护 + 安全逻辑
-- [ ] 电池监测 (ADC)
-- [ ] 参数系统 + NVS 持久化
+- [ ] 电池监测 (ADC) — 硬件限制不支持
+- [ ] PID 参数系统 + 完整 NVS 持久化（目前仅持久化 hover_throttle）
 
 ## 参考资料
 

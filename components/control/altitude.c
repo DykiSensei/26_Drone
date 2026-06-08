@@ -22,6 +22,13 @@
  * This is what prevents the takeoff overshoot/crash from a stepped target. */
 #define ALT_RAMP_RATE   0.30f
 
+/* Ground-effect ceiling (m). Below this height, prop downwash bounces off the
+ * floor giving 10-20% extra lift → P+I sees "too high" and pushes throttle down.
+ * Without freezing I, that negative integral persists, and the moment the drone
+ * climbs out of the effect, lift drops AND throttle is now under-set → sink.
+ * Freeze the I term while in this band so we leave the zone with I≈0. */
+#define ALT_GROUND_EFFECT_M  0.30f
+
 void altitude_init(altitude_ctrl_t *alt)
 {
     pid_init(&alt->pid, ALT_KP, ALT_KI, ALT_KD, ALT_OUT_LIMIT, ALT_INT_LIMIT);
@@ -81,7 +88,9 @@ float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float 
         alt->last_change_us = now;
     }
 
-    /* P + I (runs every loop; pid integrates with the main-loop dt). */
+    /* P + I (runs every loop; pid integrates with the main-loop dt).
+     * 地效区内冻结 I：避免离开地效瞬间残留负积分把油门拉死 → 掉高度。 */
+    alt->pid.freeze_integral = (current_m < ALT_GROUND_EFFECT_M);
     float pi = pid_update(&alt->pid, alt->target_m, current_m, dt);
 
     /* Damping: climbing (vz>0) → reduce throttle, descending → add throttle. */

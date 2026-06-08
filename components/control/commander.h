@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define ARMING_THROTTLE_THRESHOLD  0.05f  /* 解锁时油门必须低于此值（5%），否则拒绝解锁 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,6 +48,7 @@ typedef struct {
     float takeoff_height;   /* takeoff target altitude in meters */
     float takeoff_throttle; /* takeoff base throttle 0.0–1.0 */
     float flow_kx, flow_ky; /* optical-flow gyro-compensation gains (runtime-tuned) */
+    float flow_imu_scale;   /* IMU 加速度 → flow 单位的换算系数（互补滤波标定） */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 
@@ -75,10 +78,28 @@ const char *commander_mode_name(flight_mode_t mode);
 void commander_reset_setpoint(void);
 
 /**
+ * @brief 反向写 g_sp.throttle（takeoff 前馈用：把学习到的悬停油门
+ *        灌进 setpoint，让 alt PID 只填差量而不必从 0 扛偏差）。
+ *        clamp 到 [0, 1]。
+ */
+void commander_set_throttle(float t);
+
+/**
+ * @brief 反向写 g_sp.flow_imu_scale（启动时从 NVS 加载用）。clamp 到 [0, 100]。
+ */
+void commander_set_flow_imu_scale(float s);
+
+/**
  * @brief 检查距上次收到有效命令是否超时
  * @return true 已超时（应强制 DISARMED）
  */
 bool commander_is_command_timeout(void);
+
+/**
+ * @brief 距上次收到有效命令的微秒数（用于分级 failsafe 状态机）
+ *        从未收过命令时返回 0
+ */
+int64_t commander_us_since_last_command(void);
 
 /**
  * @brief Callback for handling special commands (calibrate, etc.)

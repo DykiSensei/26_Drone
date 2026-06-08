@@ -58,6 +58,11 @@
 ".move-btn:active{background:#1f6feb;color:#fff}\n" \
 ".move-btn.pressed{background:#1f6feb;color:#fff;border-color:#58a6ff}\n" \
 ".move-stop-btn{padding:8px;font-size:12px;background:#3a1c1c;border:1px solid #f85149;border-radius:6px;color:#f85149;cursor:pointer;font-weight:700}\n" \
+".fs-tag{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700;letter-spacing:0.5px;display:none}\n" \
+".fs-hold{display:inline-block;background:#d2991d;color:#fff}\n" \
+".fs-descend{display:inline-block;background:#f85149;color:#fff;animation:pulse 1s infinite}\n" \
+".fs-land{display:inline-block;background:#3a1c1c;color:#f85149;border:1px solid #f85149;animation:pulse 0.6s infinite}\n" \
+"@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}\n" \
 "</style>\n" \
 "</head>\n" \
 "<body>\n" \
@@ -66,6 +71,7 @@
 "<span class=\"title\">Drone</span>\n" \
 "<span id=\"conn-status\" class=\"status status-err\">Disconnected</span>\n" \
 "<span id=\"mode-display\" class=\"disarmed\">DISARMED</span>\n" \
+"<span id=\"fs-display\" class=\"fs-tag\">FS</span>\n" \
 "<span id=\"battery\" class=\"battery\">--.-V</span>\n" \
 "</div>\n" \
 "<div class=\"container\">\n" \
@@ -94,7 +100,9 @@
 "<div class=\"data-row\"><span>Qual</span><span id=\"flow-qual\">0</span></div>\n" \
 "<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Comp x/y (单帧)</span><span id=\"flow-comp\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Vel x/y (融合)</span><span id=\"flow-vel\">0.0 / 0.0</span></div>\n" \
 "<div class=\"data-row\"><span>GyroComp Kx/Ky</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
+"<div class=\"data-row\"><span>IMU Scale</span><span><input id=\"imu-s\" type=\"number\" step=\"0.1\" value=\"1.0\" style=\"width:60px\"> <button onclick=\"sendFlowScale()\">Set</button></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
 "<div class=\"controls\">\n" \
@@ -204,7 +212,8 @@
 "if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
 "if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';$('alt-out').textContent=d.alt.out.toFixed(3);if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
-"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1)}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1);if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(1)+' / '+d.flow.vy.toFixed(1);if(d.flow.s!=null&&document.activeElement!==$('imu-s'))$('imu-s').value=d.flow.s.toFixed(2)}\n" \
+"if(d.failsafe){var fe=$('fs-display');if(d.failsafe==='normal'){fe.className='fs-tag';fe.textContent='';}else{fe.className='fs-tag fs-'+d.failsafe;fe.textContent='FS:'+d.failsafe.toUpperCase();}}\n" \
 "if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
 "if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \
@@ -221,6 +230,7 @@
 "function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
 "function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky}));showToast('flow comp '+kx+' / '+ky)}\n" \
+"function sendFlowScale(){if(!connected)return;var s=parseFloat($('imu-s').value);if(isNaN(s)||s<0)s=1.0;ws.send(JSON.stringify({cmd:'flow_scale',s:s}));showToast('IMU scale '+s.toFixed(2))}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
 "/* Joysticks */\n" \
