@@ -35,23 +35,23 @@
 |------|------|------------|
 | **DISARMED** | 电机锁定，安全状态 | — |
 | **STABILIZE** | 自稳（角度 + 角速率串级 PID） | MPU6050 |
-| **ALT_HOLD** | 定高（自稳 + TOF 高度 PID，切入时自动捕获目标高度） | MPU6050 + TOF400F |
-| **POS_HOLD** | 悬停（自稳 + 定高 + 光流速度保持 + 位置控制） | MPU6050 + TOF400F + PV3901L1 |
+| **ALT_HOLD** | 定高 + 水平位置保持（TOF 高度 PID + vz 阻尼 + 光流锁位抗漂移） | MPU6050 + TOF400F + PV3901L1 |
+| **POS_HOLD** | 定点悬停（同 ALT_HOLD 基础上叠加光流速度环） | MPU6050 + TOF400F + PV3901L1 |
 
 ## 控制链路
 
 ```
 MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
                             ↓
-摇杆 → 目标倾角 ±30° + 光流修正 ±5° → Angle P → 目标角速率
+摇杆 → 目标倾角 ±30° + 光流修正 ±8° → Angle P → 目标角速率
                             ↓
                     Rate PID → 力矩输出
                             ↓
               Mixer (X-quad) → 4×PWM → 电机
 ```
 
-定高模式：摇杆油门 + 高度 PID 修正 → 有效油门
-悬停模式：光流速度保持 (setpoint=0) → 姿态修正角，叠加到目标倾角
+定高模式：摇杆油门 + 高度 PID（含 vz 垂直速度阻尼、起飞目标斜坡）→ 有效油门
+悬停模式：光流速度保持 (setpoint=0，含陀螺补偿 + 死区) → 姿态修正角 ±8°，叠加到目标倾角；位置环锁定水平位置抗漂移
 
 ## 软件架构
 
@@ -134,6 +134,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 {"cmd": "reset_trim"}                     // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
 {"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
+{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}             // 光流陀螺补偿系数运行时标定
 ```
 
 > **起飞前校准流程**：放在起飞面 → `gyro_calib` → 等 2 秒 → `level_trim` → 解锁起飞
@@ -146,8 +147,8 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
   "gyro": [x, y, z],            // 角速度 rad/s
   "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},  // 姿态角 °
   "tof": 1234,                  // TOF 距离 mm
-  "alt": {"target": 1.20, "out": 0.015},  // 定高目标/输出
-  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0},  // 光流
+  "alt": {"target": 1.20, "out": 0.015, "vz": 0.0},  // 定高目标/输出/垂直速度
+  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0, "cx": 0.0, "cy": 0.0},  // 光流(x/y积分, cr/cp修正角, cx/cy补偿后单帧)
   "motor": [0.0, 0.0, 0.0, 0.0],  // 电机 0-1
   "mtrim": [0.0, 0.0, 0.0, 0.0],  // 逐电机微调
   "pid": [0.0, 0.0, 0.0],       // PID 输出
@@ -164,9 +165,12 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 | Pitch Rate | 0.25 | 0.02 | 0.01 | ±0.8 | 0.15 |
 | Yaw Rate | 0.8 | 0.05 | 0.0 | ±0.5 | 0.15 |
 | Angle P | 6.0×DEG2RAD | — | — | ±30° | — |
-| Altitude | 0.5 | 0.05 | 0.0 | ±0.3 油门 | 0.15 |
-| Flow Velocity | 0.05 | 0.01 | 0.0 | ±5° | 2° |
-| Position | 0.5 | 0.02 | 0.0 | ±80 flow | 30 |
+| Altitude | 0.25 | 0.02 | 0.0 | ±0.3 油门 | 0.15 |
+| Flow Velocity | 0.4 | 0.06 | 0.0 | ±8° | 6° |
+| Position | 0.8 | 0.02 | 0.0 | ±80 flow | 30 |
+
+> Altitude 另含 **vz 垂直速度阻尼**（KD_VZ=0.5，IMU/TOF 互补滤波）+ **起飞目标斜坡**（0.3 m/s）。
+> Flow Velocity 另含 **陀螺补偿**（Kx=Ky=−2.5）+ **EMA 平滑/死区**（1.0）。光流信号幅度偏小，Flow Kp 取大值放大纠偏。
 
 ## 安全设计
 
@@ -174,7 +178,9 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 - **油门死区**：throttle < 5% → 停转 + 全 PID 复位，防止地面角度环翘机
 - **MOTOR_MIN 地板**：mixer 输出不低于 5%（floor-clip，非 shift-up）
 - **命令延迟执行**：ESC 校准、陀螺仪校准等阻塞操作通过 `pending_cmd` 延迟到主循环执行，避免冻结 WebSocket 通信
-- **光流质量门控**：qual > 100 + 0.04m < height < 3.0m 才生效，否则指数衰减修正
+- **光流质量门控**：qual > 50 + 0.04m < height < 3.0m 才生效，否则指数衰减修正
+- **光流陀螺补偿**：扣除姿态变化引起的旋转光流污染（`flow_comp = flow − K·gyro`，实测 Kx=Ky=−2.5），否则飞行中纠偏反向、持续漂移
+- **起飞保护**：目标高度斜坡缓升防过冲坠机；起飞即锁定水平位置抗漂移；命令竞态修复（takeoff 不被后续 stick 冲掉）
 
 ## 开发状态
 
@@ -191,6 +197,9 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `.vscode/settings.json`。
 - [x] 推力不对称补偿（Mtrim 逐电机微调）
 - [x] 自动起飞功能（前端滑块设定高度+基准油门，一键起飞）
 - [x] 光流传感器重新启用（`FLOW_ENABLED=1`）
+- [x] 高度环 vz 速度阻尼（IMU/TOF 互补）+ 起飞目标斜坡（治理上下摇摆/起飞过冲坠机）
+- [x] 光流陀螺补偿（旋转-平移解耦）+ 速度 EMA/死区 + 起飞位置锁位
+- [ ] 光流定点最终调优（光流信号偏弱，速度环增益调试中）
 - [ ] 1kHz 稳定器主循环重构
 - [ ] 失控保护 + 安全逻辑
 - [ ] 电池监测 (ADC)

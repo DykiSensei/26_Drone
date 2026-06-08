@@ -80,7 +80,7 @@ MPU6050 → Mahony → Euler angles (roll/pitch/yaw)
 Web buttons → vel_x/vel_y  ──→ flow_hold velocity PID ──→ ±5° correction to target angle
 P4 move_to → position PID ──→ velocity setpoint ────────→
 ```
-Position controller uses optical flow integral as position feedback (dead-reckoning in flow units). On reaching target, position controller resets and falls back to velocity=0 hold.
+Position controller uses optical flow integral as position feedback (dead-reckoning in flow units). It has two roles: **`move_to`** (one-shot move) and **position hold** (lock the current point to resist drift). In ALT_HOLD/POS_HOLD, position hold is the *default* — once airborne with good flow quality, the current x/y is captured and locked. A `move_to` runs to its target then **transitions into hold at that point** (no longer falls back to velocity=0). Web direction buttons temporarily override with manual velocity, then re-lock the new position on release. STABILIZE does not lock position (full manual).
 
 **Task layout** (dual-core FreeRTOS):
 - Core 0: WiFi protocol stack (ESP-IDF managed)
@@ -88,12 +88,14 @@ Position controller uses optical flow integral as position feedback (dead-reckon
 
 ## Key Design Decisions
 
+- **`FLOW_ENABLED` compile flag** (`main/main.c:25`): a `#define FLOW_ENABLED 1` gates *all* optical-flow code — PV3901L1 init, the `flow_hold`/`position` updates, the `move_to`/`move_stop`/`vel_x`/`vel_y` paths, and POS_HOLD's integral reset. Set to `0` to build without the flow module (e.g. when the hardware is broken); STABILIZE and ALT_HOLD still work, but POS_HOLD and all horizontal movement become no-ops.
 - **Shared I2C0 bus**: `i2c_bus.c` initializes I2C0 once (`g_i2c0_bus` handle). Both MPU6050 (0x68) and TOF400F (0x29) attach via `i2c_master_bus_add_device()` — never re-init the bus.
 - **Motor safety**: `MOTOR_MIN = 0.05` floor-clip (not shift-up). Throttle < 5% stops motors + resets all PIDs + resets altitude/flow/position controllers to prevent ground spooling.
+- **Altitude loop**: height PID (P+I, no PID-D) plus a **vertical-speed (`vz`) damping term** that is the real fix for up/down oscillation. `vz` is computed only on *fresh* TOF samples (TOF is stair-step ~10Hz; differentiating cached frames would spike) and EMA-smoothed. **Takeoff ramps the target altitude** from the current ground height (slew-rate limited, `ALT_RAMP_RATE`) instead of stepping straight to the goal — a stepped target caused overshoot then a throttle cut to zero (crash). `vz` is exposed in telemetry as `alt.vz`.
 - **TOF skip-counter**: VL53L1X data-ready checked every 10th call (@100Hz ≈ every 100ms) to match sensor timing budget; cached values returned otherwise.
 - **Deferred command execution**: Blocking operations (ESC calibration, gyro recalibration) are queued via `pending_cmd` and executed in the main loop context — never from the HTTP server task. This prevents WiFi/WebSocket freeze during calibration.
-- **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE. POS_HOLD adds optical flow velocity hold on top of ALT_HOLD. Mode transitions auto-capture target height and reset flow integrals.
-- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`. Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
+- **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE; POS_HOLD adds optical-flow velocity hold on top. **Both ALT_HOLD and POS_HOLD now run the position-hold loop** (lock current x/y to resist drift, flow-quality gated). Entering an altitude mode auto-captures the target height. The flow integral is **no longer reset** on POS_HOLD entry — position hold uses the absolute integral as a relative lock reference, so resetting it would dislocate the lock point and cause a fly-away; this keeps the lock continuous across ALT_HOLD↔POS_HOLD switches.
+- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`, `{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}` (runtime optical-flow gyro-compensation tuning). Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
 - **Safety mechanisms**:
   - 500ms command timeout: if no WebSocket message received for >500ms → auto-DISARMED
   - All-clients-disconnected → `commander_reset_setpoint()` forces DISARMED + throttle=0
@@ -131,9 +133,9 @@ All component headers are public (no `private_*.h`). Include patterns:
 - `pid.h` — `pid_init()`, `pid_update()`, `pid_reset()`, `pid_t`
 - `mixer.h` — `mixer_apply()`
 - `commander.h` — `commander_parse()`, `commander_get_setpoint()`, `commander_reset_setpoint()`, `commander_is_command_timeout()`, `commander_clear_pending_cmd()`, `commander_mode_name()`, `setpoint_t` (includes `vel_x`, `vel_y`, `move_to_x`, `move_to_y`, `takeoff_height`, `takeoff_throttle`), `flight_mode_t`, `CMD_*` enums
-- `altitude.h` — `altitude_init()`, `altitude_update()`, `altitude_capture_target()`, `altitude_reset()`, `altitude_ctrl_t`
-- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_update()`, `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
-- `position.h` — `position_init()`, `position_set_target()`, `position_update()`, `position_reset()`, `position_reached()`, `position_ctrl_t`
+- `altitude.h` — `altitude_init()`, `altitude_update()`, `altitude_capture_target()` (hold in place), `altitude_set_target()` (ramp from current height to a final target — used by takeoff), `altitude_reset()`, `altitude_ctrl_t`
+- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_set_gyro_comp()` (gyro-comp gains, default −2.5/−2.5), `flow_hold_update()` (takes `gyro_x/gyro_y` for rotational-flow compensation), `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
+- `position.h` — `position_init()`, `position_set_target()` (move_to, one-shot), `position_hold_start()` (lock current point, persistent — does not exit on reach), `position_update()`, `position_reset()`, `position_reached()`, `position_ctrl_t` (has `hold` flag distinguishing the two)
 
 **Communication:**
 - `wifi_ap.h` — `wifi_ap_init()`

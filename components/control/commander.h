@@ -45,6 +45,7 @@ typedef struct {
     float move_to_y;     /* P4 move_to target Y offset (flow unit, right+) */
     float takeoff_height;   /* takeoff target altitude in meters */
     float takeoff_throttle; /* takeoff base throttle 0.0–1.0 */
+    float flow_kx, flow_ky; /* optical-flow gyro-compensation gains (runtime-tuned) */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

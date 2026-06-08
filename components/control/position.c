@@ -2,7 +2,7 @@
 #include <math.h>
 
 /* 位置环 PID 参数 */
-#define POS_KP         0.5f   /* 位置误差 → 速度 */
+#define POS_KP         0.8f   /* 位置误差 → 速度（提高：更强拉回锁点） */
 #define POS_KI         0.02f  /* 慢积分消除稳态误差 */
 #define POS_KD         0.0f
 #define POS_OUT_LIMIT  80.0f  /* 输出对应光流全速 */
@@ -25,6 +25,7 @@ void position_init(position_ctrl_t *pos)
     pos->out_vx   = 0.0f;
     pos->out_vy   = 0.0f;
     pos->active   = false;
+    pos->hold     = false;
     pos->reached_count = 0;
 }
 
@@ -37,6 +38,18 @@ void position_set_target(position_ctrl_t *pos, float offset_x, float offset_y,
     pos->target_y = current_flow_iy + offset_y;
     pos->reached_count = 0;
     pos->active   = true;
+    pos->hold     = false;
+    pid_reset(&pos->pid_x);
+    pid_reset(&pos->pid_y);
+}
+
+void position_hold_start(position_ctrl_t *pos, float current_ix, float current_iy)
+{
+    pos->start_x  = pos->target_x = current_ix;
+    pos->start_y  = pos->target_y = current_iy;
+    pos->reached_count = 0;
+    pos->active   = true;
+    pos->hold     = true;
     pid_reset(&pos->pid_x);
     pid_reset(&pos->pid_y);
 }
@@ -67,6 +80,7 @@ void position_reset(position_ctrl_t *pos)
     pos->out_vx   = 0.0f;
     pos->out_vy   = 0.0f;
     pos->active   = false;
+    pos->hold     = false;
     pos->reached_count = 0;
 }
 

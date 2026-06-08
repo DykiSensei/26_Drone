@@ -177,22 +177,29 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 
 ### 3.3.1 定高控制器 `control/altitude.h`
 
-- `altitude_ctrl_t`：封装 altitude PID + 目标高度
-- `altitude_init()`：初始化 PID（Kp=0.5, Ki=0.05, Kd=0.0，输出限幅 ±0.3 油门，积分限幅 0.15）
-- `altitude_capture_target(current_m)`：切入定高模式时捕获当前 TOF 距离为目标
-- `altitude_update(target_m, current_m, dt)`：运行 PID，返回油门修正量
-- `altitude_reset()`：清零积分（DISARMED 或低油门时调用）
-- 有效油门 = 摇杆基准 + 高度 PID 修正（钳位 0.0–1.0）
+- `altitude_ctrl_t`：封装 altitude PID + 当前(斜坡)目标 `target_m` + 最终目标 `target_final_m` + 垂直速度估计 `vz`
+- `altitude_init()`：初始化 PID（**Kp=0.25, Ki=0.02, Kd=0.0**，输出限幅 ±0.3 油门，积分限幅 0.15）
+- `altitude_capture_target(current_m)`：原地保持，最终目标=当前高度（斜坡不动），定高模式切入时用
+- `altitude_set_target(final_m, current_m)`：从当前高度**斜坡爬升**到 final_m（起飞用），目标按 `ALT_RAMP_RATE=0.3 m/s` 缓升，避免阶跃过冲
+- `altitude_update(current_m, dt)`：推进目标斜坡 → 运行 P+I → 叠加 vz 阻尼，返回油门修正量
+- `altitude_reset()`：清零积分和 vz（DISARMED 或低油门时调用）
+- **垂直速度阻尼**：`output = (P+I) − ALT_KD_VZ·vz`（`ALT_KD_VZ=0.5`）。`vz` 仅在 TOF 有新值时按真实间隔差分计算（TOF 是 ~10Hz 阶梯数据，对缓存帧求导会爆尖峰），并经 EMA 平滑（`VZ_SMOOTH=0.5`）。这是抑制上下摇摆的关键项
+- 有效油门 = 摇杆基准 + 高度修正（钳位 0.0–1.0）
+- 调参背景：原 Kp=0.5/Ki=0.05/无阻尼时大幅上下摇摆（欠阻尼振荡）；降增益 + vz 阻尼后收敛。`vz` 通过遥测 `alt.vz` 暴露用于调试
 
 ### 3.3.2 光流速度保持控制器 `control/flow_hold.h`
 
 在 STABILIZE / ALT_HOLD / POS_HOLD 模式下叠加水平速度修正，主动抵抗漂移，实现垂直起飞。
 
 - `flow_hold_t`：封装两个速度 PID + 输出修正角
-- `flow_hold_init()`：初始化 PID（Kp=0.05, Ki=0.01, Kd=0.0，输出限幅 ±5°，积分限幅 2°）
+- `flow_hold_init()`：初始化 PID（Kp=0.4, Ki=0.06, Kd=0.0，输出限幅 ±8°，积分限幅 6°）。Kp 取大值因光流信号幅度小（实测 30cm 平移 comp<10），否则纠偏角小到拦不住漂移
 - `flow_hold_set_velocity(vx, vy)`：设置速度指令（flow 原始单位），0=静止保持，非零=主动移动
-- `flow_hold_update(flow_x, flow_y, qual, height_m)`：有新光流数据时更新
-  - 质量门控：`qual > 100` 才有效
+- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿系数（运行时标定，实测默认 -2.5/-2.5）
+- `flow_hold_update(flow_x, flow_y, gyro_x, gyro_y, qual, height_m)`：有新光流数据时更新
+  - **陀螺补偿（关键）**：`flow_x_comp = flow_x − kx·gyro_y`、`flow_y_comp = flow_y − ky·gyro_x`，扣除姿态变化（旋转）污染的光流，只留平移分量。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、定点持续漂走。补偿后单帧值经遥测 `flow.cx/cy` 暴露用于标定（缓慢匀速倾斜调 K 使其≈0，最优 K≈−2.5，步长 0.5）
+  - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=1.0`）：裸光流噪声大，先 EMA 平滑；死区清零静止小信号防"追假速度"漂移（参考 LiteWing/iNav）。死区前平滑值经遥测 `flow.cx/cy` 暴露用于标定
+  - 质量门控：`qual > 50` 才有效
+  - 已知瓶颈：光流信号幅度偏小（慢速漂移 comp 极小），需大 Kp 放大；若仍不足，后续考虑高度尺度（`v = flow·height·常数`）或 IMU 速度融合
   - 高度门控：0.04m < height < 3.0m
   - 用 `esp_timer_get_time()` 计算真实 dt（光流帧率低于 100Hz）
   - 质量不满足时修正指数衰减（×0.95）
@@ -239,7 +246,7 @@ P4 检测到垃圾后发送相对位置偏移指令，飞控通过光流积分�
 {"cmd": "move_stop"}
 ```
 
-立即清零速度指令 + 复位位置控制器，回到静止保持模式。
+复位 move_to 位置控制器；在 ALT_HOLD/POS_HOLD 下，下一循环会自动在当前点重新进入位置保持。
 
 ```
 控制链:
@@ -255,13 +262,14 @@ P4 检测到垃圾后发送相对位置偏移指令，飞控通过光流积分�
 
 用于 P4 的自主位置控制：
 
-- `position_ctrl_t`：封装两个位置 PID + 目标位置
+- `position_ctrl_t`：封装两个位置 PID + 目标位置 + `hold` 标志（区分持续保持 vs 一次性 move_to）
 - `position_init()`：初始化 PID（Kp=0.5, Ki=0.02, Kd=0.0，输出限幅 ±80，积分限幅 30）
-- `position_set_target(offset_x, offset_y, current_ix, current_iy)`：设置目标 = 当前位置 + 偏移
+- `position_set_target(offset_x, offset_y, current_ix, current_iy)`：**move_to** 一次性移动，目标 = 当前位置 + 偏移（hold=false）
+- `position_hold_start(current_ix, current_iy)`：**位置保持**，锁定当前点（hold=true），不因到达而退出，用于对抗漂移
 - `position_update(flow_ix, flow_iy, dt)`：运行位置 PID，输出速度指令
 - `position_reached()`：位置误差 < 20 (flow 单位) 判定到达
 - `position_reset()`：停用并清零所有状态
-- 到达后自动复位 → 回退到静止保持 (velocity setpoint=0)
+- **默认位置保持**：ALT_HOLD/POS_HOLD 下离地且光流质量达标（qual>100）即自动 `position_hold_start` 锁定当前点；move_to 到达后**转入该点位置保持**（不再回退到 velocity=0）；Web 速度按钮临时接管、松手后在新位置重新锁定
 
 未来扩展（Phase 3）：
 
@@ -323,7 +331,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   "gyro": [x, y, z],
   "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
   "tof": 1234,
-  "alt": {"target": 1.20, "out": 0.015},
+  "alt": {"target": 1.20, "out": 0.015, "vz": 0.00},
   "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0},
   "motor": [0.0, 0.0, 0.0, 0.0],
   "mtrim": [0.0, 0.0, 0.0, 0.0],
@@ -404,8 +412,8 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 |------|------|----------|------------|
 | **DISARMED** | 锁定，电机停止 | 电机停止，PID 积分清零 | — |
 | **STABILIZE** | 自稳模式（Angle + Rate） | 角度环 P + 角速率环 PID + 混控 | MPU6050 |
-| **ALT_HOLD** | 定高模式 | 自稳 + 高度环 PID（TOF 反馈），切入时自动捕获目标高度 | MPU6050 + TOF400F |
-| **POS_HOLD** | 定点悬停 | 自稳 + 光流速度保持 + 高度环，切入时重置光流积分 | MPU6050 + TOF400F + PV3901L1 |
+| **ALT_HOLD** | 定高（含位置保持） | 自稳 + 高度环 PID（TOF，目标斜坡）+ 位置保持环（光流锁定水平位置抗漂移），切入时自动捕获目标高度 | MPU6050 + TOF400F + PV3901L1 |
+| **POS_HOLD** | 定点悬停 | 自稳 + 高度环 + 位置保持 + 光流速度环，**不再清零光流积分**（位置环用绝对积分做相对锁定，跨模式连续保持） | MPU6050 + TOF400F + PV3901L1 |
 
 ### 3.9 系统管理
 

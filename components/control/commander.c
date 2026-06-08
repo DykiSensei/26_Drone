@@ -21,6 +21,8 @@ static setpoint_t g_sp = {
     .calib_motor  = 0,
     .move_to_x    = 0.0f,
     .move_to_y    = 0.0f,
+    .flow_kx      = -2.5f,  /* 陀螺补偿默认值（2026-06 实测标定） */
+    .flow_ky      = -2.5f,
     .pending_cmd  = CMD_NONE,
 };
 
@@ -51,9 +53,12 @@ void commander_parse(const char *json, int len)
         return;
     }
 
-    /* 先复制当前 g_sp 到局部变量，在此基础上修改 */
+    /* 先复制当前 g_sp 到局部变量，在此基础上修改。
+     * pending_cmd 继承自 g_sp（不在此重置）：takeoff 等命令之后前端常紧接着发
+     * stick/mode 命令，若主循环来不及在两次解析间消费就重置，会把命令冲掉
+     * （正是 takeoff target 卡住的根因）。主循环消费后会 commander_clear_pending_cmd()
+     * 清零，故保留不会导致重复执行。本次若解析到新 cmd 会在下方覆盖。 */
     setpoint_t sp = g_sp;
-    sp.pending_cmd = CMD_NONE;  /* 每次解析重置，防止旧命令残留 */
 
     cJSON *item;
 
@@ -139,6 +144,13 @@ void commander_parse(const char *json, int len)
                 sp.takeoff_throttle = clamp((float)t->valuedouble, 0.25f, 0.6f);
             sp.pending_cmd = CMD_TAKEOFF;
         }
+        else if (strcmp(item->valuestring, "flow_comp") == 0) {
+            /* 光流陀螺补偿系数标定（非阻塞，直接经 setpoint 传给主循环） */
+            cJSON *kx = cJSON_GetObjectItem(root, "kx");
+            cJSON *ky = cJSON_GetObjectItem(root, "ky");
+            if (cJSON_IsNumber(kx)) sp.flow_kx = (float)kx->valuedouble;
+            if (cJSON_IsNumber(ky)) sp.flow_ky = (float)ky->valuedouble;
+        }
     }
 
     /* Per-motor trim */
@@ -188,6 +200,8 @@ void commander_reset_setpoint(void)
         .takeoff_throttle = 0.4f,
         .pending_cmd  = CMD_NONE,
     };
+    safe.flow_kx = g_sp.flow_kx;  /* 保留陀螺补偿标定值，不被失控复位清掉 */
+    safe.flow_ky = g_sp.flow_ky;
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");

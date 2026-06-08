@@ -84,11 +84,17 @@
 "</div>\n" \
 "<div class=\"panel\"><h3>TOF Altitude</h3>\n" \
 "<div class=\"data-row\"><span>Distance</span><span id=\"tof-val\">-- mm</span></div>\n" \
+"<div class=\"data-row\"><span>Target</span><span id=\"alt-target\">0.00 m</span></div>\n" \
+"<div class=\"data-row\"><span>Out (thr)</span><span id=\"alt-out\">0.000</span></div>\n" \
+"<div class=\"data-row\"><span>Vz</span><span id=\"alt-vz\">0.00 m/s</span></div>\n" \
 "</div>\n" \
 "<div class=\"panel\"><h3>Optical Flow Position</h3>\n" \
 "<div class=\"data-row\"><span>X</span><span id=\"flow-x\">0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Y</span><span id=\"flow-y\">0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Qual</span><span id=\"flow-qual\">0</span></div>\n" \
+"<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Comp x/y (单帧)</span><span id=\"flow-comp\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>GyroComp Kx/Ky</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
 "<div class=\"controls\">\n" \
@@ -197,7 +203,8 @@
 "if(d.accel){$('accel').textContent=d.accel.map(v=>v.toFixed(2)).join(' / ')}\n" \
 "if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
-"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual}\n" \
+"if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';$('alt-out').textContent=d.alt.out.toFixed(3);if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1)}\n" \
 "if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
 "if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \
@@ -213,6 +220,7 @@
 "let toastTimer=null;function showToast(msg,warn){let t=$('toast');t.textContent=msg;t.className='toast'+(warn?' warn':'')+' show';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},1500)}\n" \
 "function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
+"function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky}));showToast('flow comp '+kx+' / '+ky)}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
 "/* Joysticks */\n" \

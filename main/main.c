@@ -114,8 +114,8 @@ static void build_telemetry(char *buf, size_t sz,
         "\"gyro\":[%.5f,%.5f,%.5f],"
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
-        "\"alt\":{\"target\":%.2f,\"out\":%.3f},"
-        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f},"
+        "\"alt\":{\"target\":%.2f,\"out\":%.3f,\"vz\":%.2f},"
+        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.1f,\"cy\":%.1f},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
@@ -126,9 +126,10 @@ static void build_telemetry(char *buf, size_t sz,
         imu->gyro_x, imu->gyro_y, imu->gyro_z,
         roll, pitch, yaw,
         tof_mm,
-        g_alt.target_m, g_alt_out,
+        g_alt.target_m, g_alt_out, g_alt.vz,
         flow->flow_x_i, flow->flow_y_i, flow->qual,
         g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
+        g_flow_hold.flow_x_comp, g_flow_hold.flow_y_comp,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -200,7 +201,7 @@ void app_main(void)
     pv3901l1_data_t flow;
     float roll = 0, pitch = 0, yaw = 0;
     float pid_r = 0, pid_p = 0, pid_y = 0;
-    char  json[640];
+    char  json[768];
     const float dt = 0.01f;
 
     while (1) {
@@ -222,6 +223,9 @@ void app_main(void)
         /* 处理延迟的 move_to / move_stop 命令（需要 flow 数据） */
         const setpoint_t *sp = commander_get_setpoint();
 #if FLOW_ENABLED
+        bool alt_mode_h = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
+        bool web_vel    = (fabsf(sp->vel_x) > 0.01f || fabsf(sp->vel_y) > 0.01f);
+
         if (g_move_to_pending) {
             position_set_target(&g_position,
                                 sp->move_to_x, sp->move_to_y,
@@ -229,37 +233,58 @@ void app_main(void)
             g_move_to_pending = false;
         }
         if (g_move_stop_pending) {
-            position_reset(&g_position);
-            flow_hold_set_velocity(&g_flow_hold, 0.0f, 0.0f);
+            position_reset(&g_position);   /* 下方默认分支会在当前点重新 hold */
             g_move_stop_pending = false;
         }
 
-        /* 水平速度指令优先级：位置控制器 > Web按钮 > 默认(0) */
-        /* API 约定: vel_x>0=前向, vel_y>0=右向
-         * flow_hold PID 内部用 -flow 作为测量值 (setpoint=0 即静止保持)
-         * 所以前向移动需要负的 setpoint，此处取反 */
+        /* 水平控制优先级（仅 ALT_HOLD / POS_HOLD 生效）：
+         *   move_to 一次性移动 > Web 速度按钮 > 位置保持(默认，对抗漂移)
+         * API: vel>0=前/右。flow_hold 用 +flow 测量(setpoint=0=静止保持)，
+         * setpoint>0 直接表示前/右意图，无需取反 */
         float vel_cmd_x = 0.0f, vel_cmd_y = 0.0f;
-        if (g_position.active) {
+
+        if (!alt_mode_h) {
+            /* STABILIZE 等：交还飞手，不做位置保持 */
+            if (g_position.active) position_reset(&g_position);
+            if (web_vel) {
+                vel_cmd_x = sp->vel_x * 80.0f;
+                vel_cmd_y = sp->vel_y * 80.0f;
+            }
+        } else if (g_position.active && !g_position.hold) {
+            /* move_to 进行中：到达后转为在该点持续位置保持 */
             position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
             if (position_reached(&g_position, flow.flow_x_i, flow.flow_y_i)) {
-                ESP_LOGW(TAG, "position target reached");
-                position_reset(&g_position);
+                ESP_LOGW(TAG, "move_to reached -> position hold");
+                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
             } else {
-                vel_cmd_x = -g_position.out_vx;
-                vel_cmd_y = -g_position.out_vy;
+                vel_cmd_x = g_position.out_vx;
+                vel_cmd_y = g_position.out_vy;
             }
+        } else if (web_vel) {
+            /* 手动速度优先：暂停位置保持，松手后默认分支在当前点重捕获 */
+            if (g_position.active) position_reset(&g_position);
+            vel_cmd_x = -(sp->vel_x * 80.0f);
+            vel_cmd_y = -(sp->vel_y * 80.0f);
         } else {
-            if (fabsf(sp->vel_x) > 0.01f || fabsf(sp->vel_y) > 0.01f) {
-                vel_cmd_x = -(sp->vel_x * 80.0f);  /* 归一化 → flow 速度单位 */
-                vel_cmd_y = -(sp->vel_y * 80.0f);
+            /* 默认：位置保持，锁定当前点对抗漂移（需光流质量达标才启动锁点） */
+            if (!g_position.active && flow.qual > 50) {
+                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
+                ESP_LOGW(TAG, "position hold @ (%.0f, %.0f)",
+                         flow.flow_x_i, flow.flow_y_i);
+            }
+            if (g_position.active) {
+                position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
+                vel_cmd_x = g_position.out_vx;
+                vel_cmd_y = g_position.out_vy;
             }
         }
         flow_hold_set_velocity(&g_flow_hold, vel_cmd_x, vel_cmd_y);
 
-        /* 光流速度保持：有新数据时更新 */
+        /* 光流速度保持：有新数据时更新（带陀螺补偿） */
+        flow_hold_set_gyro_comp(&g_flow_hold, sp->flow_kx, sp->flow_ky);
         if (flow_new == 0) {
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
-                             flow.qual, tof_mm * 0.001f);
+                             imu.gyro_x, imu.gyro_y, flow.qual, tof_mm * 0.001f);
         }
 #else
         g_move_to_pending = false;
@@ -321,15 +346,8 @@ void app_main(void)
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 
-            /* POS_HOLD 切入时重置光流积分 */
-#if FLOW_ENABLED
-            bool entering_poshold = (sp->mode == MODE_POS_HOLD)
-                                 && (g_prev_mode != MODE_POS_HOLD);
-            if (entering_poshold) {
-                pv3901l1_reset_integral();
-                ESP_LOGW(TAG, "POS_HOLD: flow integral reset");
-            }
-#endif
+            /* 注：不再在 POS_HOLD 切入时清零光流积分。位置保持环用绝对积分值
+             * 做相对锁定，清零会让 hold 锁点与测量瞬间错位、引发冲出。 */
 
             /* --- 定高：模式切入时捕获当前高度为目标 --- */
             bool entering_alt = alt_mode
@@ -340,17 +358,29 @@ void app_main(void)
                          g_alt.target_m, tof_mm);
             }
 
-            /* --- 起飞：覆盖高度目标为用户指定值 --- */
+            /* --- 起飞：从当前地面高度斜坡爬升到目标，避免阶跃过冲 --- */
             if (g_takeoff_pending) {
-                altitude_capture_target(&g_alt, sp->takeoff_height);
-                ESP_LOGW(TAG, "Takeoff: target=%.2f m", sp->takeoff_height);
+                float h_now = (tof_mm >= 40 && tof_mm <= 4000) ? tof_mm * 0.001f : 0.0f;
+                altitude_set_target(&g_alt, sp->takeoff_height, h_now);
+                ESP_LOGW(TAG, "Takeoff: ramp %.2f m -> %.2f m", h_now, sp->takeoff_height);
+#if FLOW_ENABLED
+                /* 起飞即锁定当前点：避免等 qual 达标才锁、锁到已漂走的位置 */
+                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
+                ESP_LOGW(TAG, "Takeoff: position lock @ (%.0f, %.0f)",
+                         flow.flow_x_i, flow.flow_y_i);
+#endif
                 g_takeoff_pending = false;
             }
 
             /* --- 高度环 PID --- */
             g_alt_out = 0.0f;
             if (alt_mode && tof_mm >= 40 && tof_mm <= 4000) {
-                g_alt_out = altitude_update(&g_alt, tof_mm * 0.001f, dt);
+                /* 世界系垂直加速度（扣除重力，向上为正），用于 vz 互补滤波。
+                 * 小角度悬停用 cos 倾斜补偿近似垂直分量即可。 */
+                float cr = cosf(roll  * 0.0174532925f);
+                float cp = cosf(pitch * 0.0174532925f);
+                float az_up = imu.accel_z * cr * cp - 9.81f;
+                g_alt_out = altitude_update(&g_alt, tof_mm * 0.001f, az_up, dt);
             }
 
             /* --- 姿态角控制 --- */
