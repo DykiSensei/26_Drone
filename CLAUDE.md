@@ -149,7 +149,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - **Globals**: `g_` prefix for file-static/module-level variables (e.g. `g_i2c0_bus`, `g_trim_roll`)
 - **Logging**: `static const char *TAG = "module"` then `ESP_LOGI`/`ESP_LOGW`/`ESP_LOGE`(TAG, ...)
 - **Timing**: `vTaskDelay(pdMS_TO_TICKS(10))` for 100Hz loop; `esp_timer_get_time()` for variable-rate updates (flow_hold) and command timeout
-- **JSON**: telemetry uses raw `snprintf` (not cJSON) — buffer is 640 bytes; commands use cJSON for parsing
+- **JSON**: telemetry uses raw `snprintf` (not cJSON) — buffer is 768 bytes (`main.c`); commands use cJSON for parsing
 
 ## Init Ordering
 
