@@ -143,6 +143,19 @@ void commander_parse(const char *json, int len)
             if (cJSON_IsNumber(t))
                 sp.takeoff_throttle = clamp((float)t->valuedouble, 0.25f, 0.6f);
             sp.pending_cmd = CMD_TAKEOFF;
+            /* takeoff 一次性把 mode/throttle/yaw 都设好，不依赖前端 setMode 消息。
+             * 之前的问题：doTakeoff() 顺序是 ws.send(takeoff_cmd) → setMode('alt_hold')
+             * 两条 WS 消息异步发送，到达 ESP 之间存在时延。如果 takeoff cmd 先到、
+             * mode 还是 DISARMED，主循环走 DISARMED 分支 → altitude_reset() 把
+             * g_alt 清空 + 电机停转 → 起飞流程被中断。直接在解析里一次性切好，
+             * 让主循环下一帧就看到 mode=ALT_HOLD + throttle 已就位 + pending_cmd=TAKEOFF，
+             * altitude_set_target + ramp 立刻进入工作状态。
+             *  - mode = ALT_HOLD: 让 alt PID 投入工作（否则定高反馈不存在）
+             *  - throttle = base_throttle: 给 alt PID 一个基线，免得从 0 慢慢积
+             *  - yaw = 0: 防前端摇杆残留导致起飞瞬间自旋目标 */
+            sp.mode     = MODE_ALT_HOLD;
+            sp.throttle = sp.takeoff_throttle;
+            sp.yaw      = 0.0f;
         }
         else if (strcmp(item->valuestring, "flow_comp") == 0) {
             /* 光流陀螺补偿系数标定（非阻塞，直接经 setpoint 传给主循环） */

@@ -39,9 +39,15 @@ static void parse_byte(uint8_t byte)
     case 2: /* 接收数据 */
         rx_buf[data_cnt++] = byte;
         if (data_cnt >= 9) {
-            /* 和校验: RxBuffer[2..5] 求和 == RxBuffer[6] */
+            /* 协议（手册）：
+             *   [0]=0xFE  [1]=0x04  [2..5]=flow_x/y (小端 s16)
+             *   [6]=和校验  [7]=qual  [8]=结束符(0xAA YAW高/0xBB YAW低)
+             * 双重校验：sum + 结束符。结束符错位通常意味着串口丢字节
+             * 或半个包，仅靠 sum 容易把错位数据当成有效帧 → flow_x_i 跳变。 */
             uint8_t sum = rx_buf[2] + rx_buf[3] + rx_buf[4] + rx_buf[5];
-            if (sum == rx_buf[6]) {
+            bool sum_ok  = (sum == rx_buf[6]);
+            bool tail_ok = (rx_buf[8] == 0xAA || rx_buf[8] == 0xBB);
+            if (sum_ok && tail_ok) {
                 portENTER_CRITICAL(&g_lock);
                 g_flow.flow_x = (int16_t)((rx_buf[3] << 8) | rx_buf[2]);
                 g_flow.flow_y = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);

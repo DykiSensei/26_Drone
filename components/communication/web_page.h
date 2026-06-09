@@ -92,6 +92,12 @@
 "<div class=\"data-row\"><span>X</span><span id=\"flow-x\">0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Y</span><span id=\"flow-y\">0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Qual</span><span id=\"flow-qual\">0</span></div>\n" \
+"<div class=\"data-row\"><span>Module FPS / Err</span><span id=\"flow-fps\">-- / --</span></div>\n" \
+"<div class=\"data-row\"><span>Raw fx/fy (本帧)</span><span id=\"flow-raw\">0 / 0</span></div>\n" \
+"<div class=\"data-row\"><span>Vel vx/vy (融合)</span><span id=\"flow-vel\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Pos State</span><span id=\"flow-ps\">idle</span></div>\n" \
+"<div class=\"data-row\"><span>Lock Target X/Y</span><span id=\"flow-tgt\">-- / --</span></div>\n" \
+"<div class=\"data-row\"><span>Pos Err X/Y</span><span id=\"flow-perr\">-- / --</span></div>\n" \
 "<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Comp x/y (单帧)</span><span id=\"flow-comp\">0.0 / 0.0</span></div>\n" \
 "<div class=\"data-row\"><span>GyroComp Kx/Ky</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
@@ -204,7 +210,7 @@
 "if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
 "if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';$('alt-out').textContent=d.alt.out.toFixed(3);if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
-"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1)}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1);if(d.flow.fc!=null){var now=Date.now();if(!window._fcPrev){window._fcPrev=d.flow.fc;window._fcT=now;window._fcFps=0}else if(now-window._fcT>=1000){window._fcFps=Math.round((d.flow.fc-window._fcPrev)*1000/(now-window._fcT));window._fcPrev=d.flow.fc;window._fcT=now}var fpse=$('flow-fps');fpse.textContent=window._fcFps+' fps / err '+d.flow.ec;fpse.style.color=window._fcFps>=60?'#7ee787':(window._fcFps>=20?'#d2991d':'#f85149')}if(d.flow.fx!=null)$('flow-raw').textContent=d.flow.fx+' / '+d.flow.fy;if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(1)+' / '+d.flow.vy.toFixed(1);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){$('flow-tgt').textContent=d.flow.tx.toFixed(0)+' / '+d.flow.ty.toFixed(0);var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(0)+' / '+ey.toFixed(0)}else{$('flow-tgt').textContent='-- / --';$('flow-perr').textContent='-- / --'}}}\n" \
 "if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
 "if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \

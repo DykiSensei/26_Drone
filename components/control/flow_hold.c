@@ -9,16 +9,25 @@
 #define FLOW_KD              0.0f
 #define FLOW_OUTPUT_LIMIT    8.0f   /* 最大 ±8° 修正角 */
 #define FLOW_INTEGRAL_LIMIT  6.0f   /* 积分权限（°） */
-#define FLOW_QUALITY_THRESHOLD 50
+/* 连续 quality 门限：30 起步介入（低权重），80 满权。
+ * 原 binary 50 切断在 qual 30-50 徘徊时完全无位置控制 → 漂走才锁。 */
+#define FLOW_QUALITY_LOW     30
+#define FLOW_QUALITY_HIGH    80
+#define FLOW_QUALITY_FREEZE_I  0.5f /* quality_gain 低于此值冻结 PID 积分防 windup */
 #define FLOW_MAX_HEIGHT_M    3.0f
 #define FLOW_QUALITY_SMOOTH  0.3f
 
-#define DT_MIN  0.005f
-#define DT_MAX  0.200f
-#define DECAY   0.95f
-
 #define FLOW_VEL_SMOOTH 0.3f   /* 速度 EMA 平滑系数 */
-#define FLOW_DEADBAND   1.0f   /* 速度死区：静止残留≈0，设小以免清掉真实小漂移信号 */
+#define FLOW_DEADBAND   0.3f   /* 速度死区：抗陀螺补偿残差噪声，但小到不清掉真实小漂移 */
+
+/* --- IMU + 光流 互补滤波参数 ---
+ * 高频快通道：IMU 加速度积分（短期响应快，长期偏置漂移）
+ * 低频绝对通道：光流速度测量（50Hz 离散，绝对参考但延迟）
+ * predict 每帧推进 vx_est，update 用 flow 拉回 → 高频细节 + 长期不漂。
+ * 这是修复"模块连续两帧位移太小输出 0 → flow_x_i 不增长 → Pos Err 恒 0"的关键。 */
+#define IMU_LEAK         0.999f  /* 每帧慢衰减，防 accel 偏置积爆（τ≈10s @100Hz） */
+#define FLOW_CORRECT_K   0.30f   /* flow 修正强度：新 flow 帧把 vx_est 拉向测量值的比例 */
+#define IMU_SCALE_DEFAULT 1.0f   /* m/s² → flow_unit/s²；需要试飞标定，默认 1.0 */
 
 void flow_hold_init(flow_hold_t *fh)
 {
@@ -39,6 +48,39 @@ void flow_hold_init(flow_hold_t *fh)
     fh->flow_y_f = 0.0f;
     fh->flow_x_comp = 0.0f;
     fh->flow_y_comp = 0.0f;
+    fh->vx_est = 0.0f;
+    fh->vy_est = 0.0f;
+    fh->imu_scale = IMU_SCALE_DEFAULT;
+    fh->flow_x_corr = 0.0f;
+    fh->flow_y_corr = 0.0f;
+}
+
+void flow_hold_set_imu_scale(flow_hold_t *fh, float scale)
+{
+    fh->imu_scale = scale;
+}
+
+void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt)
+{
+    /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆） */
+    fh->vx_est = (fh->vx_est + fh->imu_scale * ax_world * dt) * IMU_LEAK;
+    fh->vy_est = (fh->vy_est + fh->imu_scale * ay_world * dt) * IMU_LEAK;
+
+    /* PID 100Hz 更新（比原来 update 里 50Hz 多一倍带宽，能跟住 IMU 高频信息）。
+     * 低 quality 时冻结积分，避免噪声 windup。
+     * 符号：保持 master 原始 mixer 约定（p = +pitch * MIXER_SCALE，未取反）。
+     * 之前在 feature 分支用了 -pid_update 是因为 feature 的 mixer 内部 p 取反，
+     * 两个分支 pitch 物理方向相反；master 上不需要反号。 */
+    bool freeze = (fh->quality_gain < FLOW_QUALITY_FREEZE_I);
+    fh->pid_vx.freeze_integral = freeze;
+    fh->pid_vy.freeze_integral = freeze;
+
+    fh->out_pitch_deg = pid_update(&fh->pid_vx, fh->setpoint_vx, fh->vx_est, dt)
+                      * fh->quality_gain;
+    fh->out_roll_deg  = pid_update(&fh->pid_vy, fh->setpoint_vy, fh->vy_est, dt)
+                      * fh->quality_gain;
+
+    fh->active = (fh->quality_gain > 0.01f);
 }
 
 void flow_hold_set_velocity(flow_hold_t *fh, float vx, float vy)
@@ -56,33 +98,26 @@ void flow_hold_set_gyro_comp(flow_hold_t *fh, float kx, float ky)
 void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
                       float gyro_x, float gyro_y, uint8_t qual, float height_m)
 {
-    bool valid = (qual > FLOW_QUALITY_THRESHOLD)
-              && (height_m > 0.04f)
-              && (height_m < FLOW_MAX_HEIGHT_M);
+    bool height_ok = (height_m > 0.04f) && (height_m < FLOW_MAX_HEIGHT_M);
+    bool valid     = height_ok && (qual > FLOW_QUALITY_LOW);
 
-    /* EMA smooth of quality signal */
-    float q_target = valid ? 1.0f : 0.0f;
+    /* 连续 quality 权重：qual≤LOW → 0；qual≥HIGH → 1；中间线性插值 */
+    float q_target;
+    if (!height_ok || qual <= FLOW_QUALITY_LOW) {
+        q_target = 0.0f;
+    } else if (qual >= FLOW_QUALITY_HIGH) {
+        q_target = 1.0f;
+    } else {
+        q_target = (float)(qual - FLOW_QUALITY_LOW)
+                 / (float)(FLOW_QUALITY_HIGH - FLOW_QUALITY_LOW);
+    }
     fh->quality_gain += FLOW_QUALITY_SMOOTH * (q_target - fh->quality_gain);
 
-    int64_t now = esp_timer_get_time();
+    fh->last_update_us = esp_timer_get_time();
 
     if (valid) {
-        float dt;
-        if (fh->last_update_us == 0) {
-            dt = 0.01f;  /* first frame, use nominal dt */
-        } else {
-            dt = (float)(now - fh->last_update_us) * 1e-6f;
-        }
-        if (dt < DT_MIN) dt = DT_MIN;
-        if (dt > DT_MAX) dt = DT_MAX;
-
-        /* Flow is velocity; setpoint = 0 means "resist any motion".
-         * measurement = +flow (bench-verified): forward drift (flow_x>0) →
-         * out_pitch = KP*(0-flow_x) < 0. pitch stick + = forward, so a negative
-         * target pitch tilts backward and cancels the forward drift.
-         * Active move: setpoint>0 drives forward until flow_x tracks it. */
         /* 陀螺补偿：扣除姿态变化引起的旋转光流，只留平移分量。
-         * pitch rate(gyro_y) 污染 x 轴光流，roll rate(gyro_x) 污染 y 轴。 */
+         * pitch rate(gyro_y) 污染 x 轴光流，roll rate(gyro_x) 污染 y 轴 */
         float fx = (float)flow_x - fh->gyro_kx * gyro_y;
         float fy = (float)flow_y - fh->gyro_ky * gyro_x;
 
@@ -90,23 +125,26 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
         fh->flow_x_f += FLOW_VEL_SMOOTH * (fx - fh->flow_x_f);
         fh->flow_y_f += FLOW_VEL_SMOOTH * (fy - fh->flow_y_f);
 
-        /* 死区：静止小信号清零——防止光流残留噪声/偏置(陀螺补偿不可能完美)被
-         * 速度环当成真实运动而持续纠偏漂移。这是光流定点的标准防漂手段
-         * (参考 LiteWing/iNav)。死区内不响应，避免"追假速度"飞走。 */
+        /* 死区：静止小信号清零 → 防止光流残留噪声被当成真实运动 */
         float fxd = (fabsf(fh->flow_x_f) < FLOW_DEADBAND) ? 0.0f : fh->flow_x_f;
         float fyd = (fabsf(fh->flow_y_f) < FLOW_DEADBAND) ? 0.0f : fh->flow_y_f;
-        fh->flow_x_comp = fh->flow_x_f;  /* 遥测显示平滑后(死区前)，用于标定死区阈值 */
+        fh->flow_x_comp = fh->flow_x_f;
         fh->flow_y_comp = fh->flow_y_f;
-        fh->out_pitch_deg = pid_update(&fh->pid_vx, fh->setpoint_vx, fxd, dt);
-        fh->out_roll_deg  = pid_update(&fh->pid_vy, fh->setpoint_vy, fyd, dt);
-    } else {
-        /* Fade corrections smoothly when quality drops */
-        fh->out_pitch_deg *= DECAY;
-        fh->out_roll_deg  *= DECAY;
-    }
 
-    fh->last_update_us = now;
-    fh->active = (fh->quality_gain > 0.01f);
+        /* 互补滤波修正：用 flow 测量把 vx_est 拉回真值。
+         * 修正强度按 quality_gain 缩放：低 qual 时少信任 flow。
+         * 即使模块输出 0（连续两帧位移太小），fxd 就是 0 → vx_est 会被
+         * 拉向 0（衰减），同时 IMU 积分仍在 predict 阶段推进。 */
+        float k = FLOW_CORRECT_K * fh->quality_gain;
+        fh->vx_est += k * (fxd - fh->vx_est);
+        fh->vy_est += k * (fyd - fh->vy_est);
+
+        fh->flow_x_corr = fxd;
+        fh->flow_y_corr = fyd;
+    } else {
+        /* invalid 时不动 vx_est（让 IMU 通道继续推进，慢衰减自动回归）
+         * 也不动 out_*（predict 仍在跑，但 quality_gain → 0 输出自然衰减） */
+    }
 }
 
 void flow_hold_reset(flow_hold_t *fh)
@@ -122,6 +160,10 @@ void flow_hold_reset(flow_hold_t *fh)
     fh->active = false;
     fh->flow_x_f = 0.0f;
     fh->flow_y_f = 0.0f;
+    fh->vx_est = 0.0f;
+    fh->vy_est = 0.0f;
+    fh->flow_x_corr = 0.0f;
+    fh->flow_y_corr = 0.0f;
 }
 
 bool flow_hold_is_active(const flow_hold_t *fh)

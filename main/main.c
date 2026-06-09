@@ -39,11 +39,18 @@ static bool  g_capture_trim = false;
 static bool  g_move_to_pending = false;   /* CMD_MOVE_TO 延迟到主循环处理 */
 static bool  g_move_stop_pending = false; /* CMD_MOVE_STOP 延迟到主循环处理 */
 static bool  g_takeoff_pending = false;   /* CMD_TAKEOFF 延迟到主循环处理 */
+static bool  g_position_lock_pending = false;  /* takeoff 期间延迟启动位置环：等飞机
+                                                * 稳定在目标高度后再锁定当前点，避免
+                                                * 上升阶段机身倾斜让光流积分带噪声 →
+                                                * position 误判为漂移 → 输出 vel_cmd 干扰起飞 */
 
 static altitude_ctrl_t g_alt;            /* 定高 PID 控制器 */
 static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
 static position_ctrl_t g_position;        /* 光流位置控制器 (P4 move_to) */
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
+static float           g_ax_filt = 0.0f;  /* accel X EMA for flow predict */
+static float           g_ay_filt = 0.0f;  /* accel Y EMA for flow predict */
+#define ACCEL_EMA_ALPHA 0.3f              /* ~5.7Hz cutoff @ 100Hz */
 static flight_mode_t   g_prev_mode = MODE_DISARMED;
 
 static void on_all_clients_disconnected(void)
@@ -108,6 +115,18 @@ static void build_telemetry(char *buf, size_t sz,
                             const pv3901l1_data_t *flow,
                             float pid_r, float pid_p, float pid_y)
 {
+    /* 位置环状态编码（前端无串口时观察）：
+     *   0 = idle（无 hold、无 pending）
+     *   1 = pending（takeoff 上升中等达标后启动）
+     *   2 = hold（已锁定，正常工作）
+     *   3 = move_to（一次性移动中） */
+    int pos_state = 0;
+    if (g_position.active) {
+        pos_state = g_position.hold ? 2 : 3;
+    } else if (g_position_lock_pending) {
+        pos_state = 1;
+    }
+
     snprintf(buf, sz,
         "{"
         "\"accel\":[%.3f,%.3f,%.3f],"
@@ -115,7 +134,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
         "\"alt\":{\"target\":%.2f,\"out\":%.3f,\"vz\":%.2f},"
-        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.1f,\"cy\":%.1f},"
+        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.1f,\"cy\":%.1f,\"ps\":%d,\"tx\":%.0f,\"ty\":%.0f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.1f,\"vy\":%.1f},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
@@ -130,6 +149,10 @@ static void build_telemetry(char *buf, size_t sz,
         flow->flow_x_i, flow->flow_y_i, flow->qual,
         g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
         g_flow_hold.flow_x_comp, g_flow_hold.flow_y_comp,
+        pos_state, g_position.target_x, g_position.target_y,
+        (unsigned long)flow->frame_count, (unsigned long)flow->error_count,
+        (int)flow->flow_x, (int)flow->flow_y,
+        g_flow_hold.vx_est, g_flow_hold.vy_est,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -266,8 +289,11 @@ void app_main(void)
             vel_cmd_x = -(sp->vel_x * 80.0f);
             vel_cmd_y = -(sp->vel_y * 80.0f);
         } else {
-            /* 默认：位置保持，锁定当前点对抗漂移（需光流质量达标才启动锁点） */
-            if (!g_position.active && flow.qual > 50) {
+            /* 默认：位置保持，锁定当前点对抗漂移。
+             *  - flow.qual 阈值降到 30 配合 flow_hold 软启动
+             *  - takeoff 上升期 (g_position_lock_pending=true) 跳过自动锁定，
+             *    等达到目标高度后由下方"达标后启动"逻辑统一处理 */
+            if (!g_position.active && !g_position_lock_pending && flow.qual > 30) {
                 position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
                 ESP_LOGW(TAG, "position hold @ (%.0f, %.0f)",
                          flow.flow_x_i, flow.flow_y_i);
@@ -279,9 +305,18 @@ void app_main(void)
             }
         }
         flow_hold_set_velocity(&g_flow_hold, vel_cmd_x, vel_cmd_y);
-
-        /* 光流速度保持：有新数据时更新（带陀螺补偿） */
         flow_hold_set_gyro_comp(&g_flow_hold, sp->flow_kx, sp->flow_ky);
+
+        /* IMU + 光流 互补滤波：
+         *   - predict 每帧（100Hz）跑：IMU 加速度积分 → vx_est，并跑 PID 算修正角
+         *   - update 仅在新光流帧（~50Hz）跑：陀螺补偿后用 flow 校正 vx_est
+         * 解决 PV3901L1 模块"连续两帧位移太小输出 0"导致的微小漂移检测不到问题：
+         * 即使 flow 给 0，IMU 积分通道仍能捕捉短时位移，光流只做长期校正防漂。
+         * accel_x/y 直接当世界系水平加速度用（小角度悬停 cos<10° → 误差 <3%）。 */
+        g_ax_filt += ACCEL_EMA_ALPHA * (imu.accel_x - g_ax_filt);
+        g_ay_filt += ACCEL_EMA_ALPHA * (imu.accel_y - g_ay_filt);
+        flow_hold_predict(&g_flow_hold, g_ax_filt, g_ay_filt, dt);
+
         if (flow_new == 0) {
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
                              imu.gyro_x, imu.gyro_y, flow.qual, tof_mm * 0.001f);
@@ -332,6 +367,9 @@ void app_main(void)
             altitude_reset(&g_alt);
             flow_hold_reset(&g_flow_hold);
             position_reset(&g_position);
+            g_position_lock_pending = false;
+            g_ax_filt = 0.0f;
+            g_ay_filt = 0.0f;
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
             if (sp->throttle < 0.05f) {
@@ -343,6 +381,9 @@ void app_main(void)
                 altitude_reset(&g_alt);
                 flow_hold_reset(&g_flow_hold);
                 position_reset(&g_position);
+                g_position_lock_pending = false;
+                g_ax_filt = 0.0f;
+                g_ay_filt = 0.0f;
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 
@@ -364,10 +405,12 @@ void app_main(void)
                 altitude_set_target(&g_alt, sp->takeoff_height, h_now);
                 ESP_LOGW(TAG, "Takeoff: ramp %.2f m -> %.2f m", h_now, sp->takeoff_height);
 #if FLOW_ENABLED
-                /* 起飞即锁定当前点：避免等 qual 达标才锁、锁到已漂走的位置 */
-                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
-                ESP_LOGW(TAG, "Takeoff: position lock @ (%.0f, %.0f)",
-                         flow.flow_x_i, flow.flow_y_i);
+                /* 上升阶段不锁位置：机身倾斜让光流积分带噪声 → 假漂移 → 误干预。
+                 * 标记 g_position_lock_pending，等到达目标高度且稳定后再锁。
+                 * 若 default 分支之前已经启动了 position（地面静止时 qual 达标），
+                 * 这里先 reset 掉，避免上升过程中持续输出 vel_cmd。 */
+                if (g_position.active) position_reset(&g_position);
+                g_position_lock_pending = true;
 #endif
                 g_takeoff_pending = false;
             }
@@ -381,6 +424,23 @@ void app_main(void)
                 float cp = cosf(pitch * 0.0174532925f);
                 float az_up = imu.accel_z * cr * cp - 9.81f;
                 g_alt_out = altitude_update(&g_alt, tof_mm * 0.001f, az_up, dt);
+
+#if FLOW_ENABLED
+                /* takeoff 达到目标高度且稳定后启动位置环。
+                 * 触发条件：高度误差 < 10cm（相对 final，ramp 完成）+ |vz| < 0.15m/s（不上不下）
+                 *           + flow.qual > 30（光流可信）。任一不满足保持 pending，下次主循环再判。 */
+                if (g_position_lock_pending) {
+                    float current_m = tof_mm * 0.001f;
+                    bool reached = fabsf(current_m - g_alt.target_final_m) < 0.10f;
+                    bool steady  = fabsf(g_alt.vz) < 0.15f;
+                    if (reached && steady && flow.qual > 30) {
+                        position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
+                        ESP_LOGW(TAG, "Reached target -> position lock @ (%.0f, %.0f)",
+                                 flow.flow_x_i, flow.flow_y_i);
+                        g_position_lock_pending = false;
+                    }
+                }
+#endif
             }
 
             /* --- 姿态角控制 --- */

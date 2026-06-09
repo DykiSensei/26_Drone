@@ -105,7 +105,8 @@ Commander setpoint → 模式判断:
 
 #### MPU6050 驱动 `drivers/mpu6050.h`
 - I2C0 设备地址 0x68, 400kHz，先 probe 再注册，WHO_AM_I 5 次重试
-- 配置：陀螺仪 ±2000°/s, 加速度计 ±16g, DLPF 256Hz, 采样率 8kHz (gyro) / 1kHz (accel)
+- 配置：陀螺仪 ±2000°/s, 加速度计 ±16g, **DLPF=4（~21Hz BW）**, 采样率 8kHz (gyro) / 1kHz (accel)
+  - DLPF=4 是为 IMU+光流互补滤波准备的：原 DLPF=0 (256Hz BW) 让电机振动直接进入 accel → 积分到 vx_est 形成假漂移，DLPF=4 把振动频带（>50Hz）滤掉
 - 上电自动校准：采样 500 次求零偏（陀螺仪 xyz + 加速度 xy）
 - 输出单位：加速度 m/s², 角速度 rad/s, 已扣除零偏
 - **起飞前再校准**：`mpu6050_recalibrate_gyro()`，采样 100 次（1 秒），**同步重校准陀螺仪零偏和加速度计 x/y 零偏**。加速度计以当前放置面为"水平"基准，消除上电面与起飞面不一致导致的姿态偏差。校准后自动调用 `attitude_init()` 复位 Mahony 滤波器（防止旧积分项使用过期零偏导致漂移），约 2 秒内重新收敛到真实姿态
@@ -187,31 +188,54 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 - 有效油门 = 摇杆基准 + 高度修正（钳位 0.0–1.0）
 - 调参背景：原 Kp=0.5/Ki=0.05/无阻尼时大幅上下摇摆（欠阻尼振荡）；降增益 + vz 阻尼后收敛。`vz` 通过遥测 `alt.vz` 暴露用于调试
 
-### 3.3.2 光流速度保持控制器 `control/flow_hold.h`
+### 3.3.2 光流速度保持控制器 `control/flow_hold.h`（IMU + 光流互补滤波）
 
 在 STABILIZE / ALT_HOLD / POS_HOLD 模式下叠加水平速度修正，主动抵抗漂移，实现垂直起飞。
 
-- `flow_hold_t`：封装两个速度 PID + 输出修正角
-- `flow_hold_init()`：初始化 PID（Kp=0.4, Ki=0.06, Kd=0.0，输出限幅 ±8°，积分限幅 6°）。Kp 取大值因光流信号幅度小（实测 30cm 平移 comp<10），否则纠偏角小到拦不住漂移
+**核心改动**：旧实现直接用裸光流速度跑 PID。PV3901L1 模块有内部死区（连续两帧位移太小直接输出 0），导致小漂移检测不到 → 等漂大了才介入 → 锁不住。新实现引入 **IMU 加速度积分 + 光流测量互补滤波**：
+
+- `flow_hold_t`：封装两个速度 PID + **vx_est/vy_est 互补滤波速度状态** + 输出修正角
+- `flow_hold_init()`：初始化 PID（Kp=0.4, Ki=0.06, Kd=0.0，输出限幅 ±8°，积分限幅 6°）
+
+#### predict（100Hz，每帧调用）
+```c
+flow_hold_predict(fh, ax_world, ay_world, dt)
+```
+- IMU 加速度积分 + 慢衰减：`vx_est = (vx_est + imu_scale·ax·dt) * IMU_LEAK`（`IMU_LEAK=0.999`, τ≈10s @100Hz，防 accel 偏置积爆）
+- 输入是经过 **DLPF=4 硬件低通 + 软件 EMA（α=0.3, ~5.7Hz）** 双层滤波的 accel_x/y，振动噪声不会污染 vx_est
+- 跑 PID（100Hz，比旧 50Hz 多一倍带宽）：`out_pitch_deg = pid_update(pid_vx, setpoint_vx, vx_est, dt) * quality_gain`
+- 低 quality 时（`quality_gain < FLOW_QUALITY_FREEZE_I=0.5`）冻结 PID 积分避免 windup
+
+#### update（~50Hz，仅在新光流帧调用）
+```c
+flow_hold_update(fh, flow_x, flow_y, gyro_x, gyro_y, qual, height_m)
+```
+- **陀螺补偿**（关键）：`fx = flow_x − kx·gyro_y`、`fy = flow_y − ky·gyro_x`，扣除姿态变化引起的旋转光流，只留平移分量。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、定点持续漂走。补偿后单帧值经遥测 `flow.cx/cy` 暴露用于标定（缓慢匀速倾斜调 K 使其≈0，最优 K≈−2.5，步长 0.5）
+- **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=0.3`）：先 EMA 平滑；死区清零静止小信号防"追假速度"。原死区 1.0 过大会把真实慢漂移（~0.5/s）也清零，降到 0.3
+- **互补滤波修正**：`vx_est += FLOW_CORRECT_K · quality_gain · (fxd − vx_est)`（`FLOW_CORRECT_K=0.30`），新光流把 vx_est 拉向测量值的比例由 quality_gain 缩放
+- 即使模块输出 0（连续两帧位移太小），fxd 就是 0 → vx_est 会被拉向 0（慢衰减），同时 IMU 积分仍在 predict 推进 → 短时小漂移仍可被捕捉
+- 质量门控：**连续 quality 权重**（`FLOW_QUALITY_LOW=30` 起步、`FLOW_QUALITY_HIGH=80` 满权，线性插值），EMA 平滑（`FLOW_QUALITY_SMOOTH=0.3`）。原 binary 50 切断在 qual 30-50 徘徊时完全无位置控制 → 漂走才锁
+- 高度门控：0.04m < height < 3.0m
+- 用 `esp_timer_get_time()` 记录最近 update 时间戳
+
+#### 其他
 - `flow_hold_set_velocity(vx, vy)`：设置速度指令（flow 原始单位），0=静止保持，非零=主动移动
-- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿系数（运行时标定，实测默认 -2.5/-2.5）
-- `flow_hold_update(flow_x, flow_y, gyro_x, gyro_y, qual, height_m)`：有新光流数据时更新
-  - **陀螺补偿（关键）**：`flow_x_comp = flow_x − kx·gyro_y`、`flow_y_comp = flow_y − ky·gyro_x`，扣除姿态变化（旋转）污染的光流，只留平移分量。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、定点持续漂走。补偿后单帧值经遥测 `flow.cx/cy` 暴露用于标定（缓慢匀速倾斜调 K 使其≈0，最优 K≈−2.5，步长 0.5）
-  - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=1.0`）：裸光流噪声大，先 EMA 平滑；死区清零静止小信号防"追假速度"漂移（参考 LiteWing/iNav）。死区前平滑值经遥测 `flow.cx/cy` 暴露用于标定
-  - 质量门控：`qual > 50` 才有效
-  - 已知瓶颈：光流信号幅度偏小（慢速漂移 comp 极小），需大 Kp 放大；若仍不足，后续考虑高度尺度（`v = flow·height·常数`）或 IMU 速度融合
-  - 高度门控：0.04m < height < 3.0m
-  - 用 `esp_timer_get_time()` 计算真实 dt（光流帧率低于 100Hz）
-  - 质量不满足时修正指数衰减（×0.95）
-- `flow_hold_reset()`：DISARMED / 低油门时清零 PID 和输出
+- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿系数（运行时标定，默认 -2.5/-2.5）
+- `flow_hold_set_imu_scale(scale)`：m/s² → flow_unit/s² 转换系数（运行时试飞标定，默认 1.0）
+- `flow_hold_reset()`：DISARMED / 低油门时清零 PID 和 vx_est/vy_est
 - `flow_hold_is_active()`：`quality_gain > 0.01` 时返回 true
-- 修正叠加在摇杆目标角度上（±30° + ±5°），不影响飞行员操控权限
-- 速度环的积分项隐含位置保持效果（∫速度误差 = 位置误差）
+- 修正叠加在摇杆目标角度上（±30° + ±8°），不影响飞行员操控权限
 
 ```
-光流 flow_x/flow_y (速度测量，setpoint 可设为非零)
-    → 速度 PID → 修正角 ±5°
-    → 叠加到 stick 目标角度 → Angle P → Rate PID → Mixer → 电机
+                ┌─ predict @100Hz (IMU 高频快通道) ─┐
+ax/ay (DLPF+EMA)→│ vx_est += imu_scale·a·dt        │── PID → 修正角 ±8°
+                │ vx_est *= IMU_LEAK              │       ↓
+                └────────────────┬──────────────────┘  叠加到 stick 目标角度
+                                 │                       → Angle P → Rate PID → Mixer
+                 ┌─ update @~50Hz (光流低频绝对参考) ─┐
+flow_x/y, gyro → │ gyro 补偿 → EMA → 死区 → fxd     │
+                │ vx_est += K·quality·(fxd−vx_est) │
+                └─────────────────────────────────────┘
 ```
 
 ### 3.3.3 水平移动控制（Web 按钮 / P4 API）
@@ -269,7 +293,8 @@ P4 检测到垃圾后发送相对位置偏移指令，飞控通过光流积分�
 - `position_update(flow_ix, flow_iy, dt)`：运行位置 PID，输出速度指令
 - `position_reached()`：位置误差 < 20 (flow 单位) 判定到达
 - `position_reset()`：停用并清零所有状态
-- **默认位置保持**：ALT_HOLD/POS_HOLD 下离地且光流质量达标（qual>100）即自动 `position_hold_start` 锁定当前点；move_to 到达后**转入该点位置保持**（不再回退到 velocity=0）；Web 速度按钮临时接管、松手后在新位置重新锁定
+- **默认位置保持**：ALT_HOLD/POS_HOLD 下离地且光流质量达标（qual>30）即自动 `position_hold_start` 锁定当前点；move_to 到达后**转入该点位置保持**（不再回退到 velocity=0）；Web 速度按钮临时接管、松手后在新位置重新锁定
+- **takeoff 期间延迟锁定**：上升阶段机身倾斜让光流积分带噪声 → 假漂移 → position 误判漂移而输出 vel_cmd 干扰起飞。`g_position_lock_pending` 标志在 takeoff 时置位，跳过默认锁定分支；高度环判定 `|current − target_final| < 10cm && |vz| < 0.15 m/s && qual > 30` 三者全满足时再启动位置锁定
 
 未来扩展（Phase 3）：
 
@@ -404,6 +429,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
   - `CMD_CALIBRATE_MOTOR` — 单电机电调校准（带 `motor_index` 参数）
   - `CMD_TAKEOFF` — 自动起飞（设定目标高度，切入 ALT_HOLD，设定基准油门）
 - 命令通过 `pending_cmd` 字段延迟到主循环执行，确保阻塞操作（校准）不冻结 HTTP/WebSocket 通信
+- **takeoff 命令原子化**：CMD_TAKEOFF 在 `commander_parse()` 中**同时设置** `mode=MODE_ALT_HOLD, throttle=takeoff_throttle, yaw=0`（连同 `pending_cmd` 一起一次 struct 赋值）。修复了前端发送 `takeoff` 与 `setMode` 是两包 WebSocket 消息、之间主循环跑了 DISARMED 分支调 `altitude_reset` 把目标清零的竞态
 - **原子更新**：`commander_parse()` 先将当前 `g_sp` 复制到局部变量，在局部变量上修改，最后一次性 struct 赋值写回 `g_sp`，将竞态窗口缩小为单条 memcpy
 - **命令超时**：`commander_is_command_timeout()` 记录最后一次收到有效 WebSocket 命令的时间戳（`esp_timer_get_time()`），若超过 500ms 未收到任何命令 → 主循环强制调用 `commander_reset_setpoint()` 回到 DISARMED
 - **断连复位**：`commander_reset_setpoint()` 将 `g_sp` 重置为安全状态（DISARMED, 油门=0, motor_active=false），同时清零时间戳防止循环触发超时

@@ -119,8 +119,8 @@ int mpu6050_init(void)
     /* Sample rate: 0 = max (8kHz gyro, 1kHz accel) */
     write_reg(REG_SMPLRT_DIV, 0x00);
 
-    /* DLPF: 0 = 256Hz accel BW, 256Hz gyro BW */
-    write_reg(REG_CONFIG, 0x00);
+    /* DLPF: 4 = ~21Hz accel BW, ~20Hz gyro BW — kills motor vibration */
+    write_reg(REG_CONFIG, 0x04);
 
     /* Gyro full scale: ±2000°/s */
     write_reg(REG_GYRO_CONFIG, 0x18);  /* FS_SEL = 3 */
