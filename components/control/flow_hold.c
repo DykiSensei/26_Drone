@@ -68,16 +68,18 @@ void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt
 
     /* PID 100Hz 更新（比原来 update 里 50Hz 多一倍带宽，能跟住 IMU 高频信息）。
      * 低 quality 时冻结积分，避免噪声 windup。
-     * 符号：保持 master 原始 mixer 约定（p = +pitch * MIXER_SCALE，未取反）。
-     * 之前在 feature 分支用了 -pid_update 是因为 feature 的 mixer 内部 p 取反，
-     * 两个分支 pitch 物理方向相反；master 上不需要反号。 */
+     * 输出取反（关键符号）：本机实测 前推 fx>0、右推 fy>0（取决于光流模块
+     * 安装方向，换装后需重新核对），即 前/右 = 光流正方向。而正 pitch 角 =
+     * 抬头 = 向后加速、正 roll 角 = 右侧抬 = 向左加速 —— 正修正角产生负方向
+     * 加速度。前漂 (vx_est>0) 必须抬头 (+pitch) 拦截，pid(0, +v) 输出为负，
+     * 故取反。不取反则速度环为正反馈：漂移方向被加速 → 定点直接漂走。 */
     bool freeze = (fh->quality_gain < FLOW_QUALITY_FREEZE_I);
     fh->pid_vx.freeze_integral = freeze;
     fh->pid_vy.freeze_integral = freeze;
 
-    fh->out_pitch_deg = pid_update(&fh->pid_vx, fh->setpoint_vx, fh->vx_est, dt)
+    fh->out_pitch_deg = -pid_update(&fh->pid_vx, fh->setpoint_vx, fh->vx_est, dt)
                       * fh->quality_gain;
-    fh->out_roll_deg  = pid_update(&fh->pid_vy, fh->setpoint_vy, fh->vy_est, dt)
+    fh->out_roll_deg  = -pid_update(&fh->pid_vy, fh->setpoint_vy, fh->vy_est, dt)
                       * fh->quality_gain;
 
     fh->active = (fh->quality_gain > 0.01f);

@@ -2,10 +2,14 @@
 #include <math.h>
 
 /* 位置环 PID 参数 */
-#define POS_KP         0.8f   /* 位置误差 → 速度（提高：更强拉回锁点） */
+#define POS_KP         0.15f  /* 位置误差 → 速度 setpoint。实测悬停级光流速度
+                               * 只有个位数（30cm 平移 comp<10），0.8 会在几 cm
+                               * 误差时就把速度环打到 ±8° 满舵 → 围绕锁点振荡
+                               * 永不收敛。0.15: 10cm 误差 ≈ 温和拉回速度。 */
 #define POS_KI         0.02f  /* 慢积分消除稳态误差 */
 #define POS_KD         0.0f
-#define POS_OUT_LIMIT  80.0f  /* 输出对应光流全速 */
+#define POS_OUT_LIMIT  20.0f  /* 速度 setpoint 上限：压在光流可测的真实速度
+                               * 量级内，避免速度环长期饱和（手动按钮仍 ±80）。 */
 #define POS_INT_LIMIT  30.0f
 
 /* 到达目标判定 */

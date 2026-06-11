@@ -10,29 +10,31 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`.
 
 ## Build & Flash
 
-- ESP-IDF environment: `D:/Espressif/frameworks/esp-idf-v5.5.4/`
+- ESP-IDF environment: `C:/Espressif/frameworks/esp-idf-v5.5.4/`
 - Target: `esp32s3`
 - Flash port: `COM14`
 
-On this machine, `idf.py` is not on PATH — invoke via the full Python + idf.py path:
+On this machine, `idf.py` is not on PATH. **Must run from PowerShell/cmd — idf.py rejects MSYS/bash environments.** Invoke via the IDF Python env + full idf.py path:
 
-```bash
+```powershell
 # Set up ESP-IDF env (needed once per shell):
-export PATH="D:/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119/xtensa-esp-elf/bin:D:/Espressif/tools/cmake/3.30.2/bin:D:/Espressif/tools/ninja/1.12.1:$PATH"
-export IDF_PATH="D:/Espressif/frameworks/esp-idf-v5.5.4"
+$env:PATH = "C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20260121\xtensa-esp-elf\bin;C:\Espressif\tools\cmake\3.30.2\bin;C:\Espressif\tools\ninja\1.12.1;" + $env:PATH
+$env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 
 # Build
-python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone build
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone build
 
 # Flash + monitor
-python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone flash monitor
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone flash monitor
 
 # Clean build (after messing with config)
-python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone fullclean
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone fullclean
 
 # On new machines: set target first
-python D:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py -C C:/Users/15381/26_Drone set-target esp32s3
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone set-target esp32s3
 ```
+
+(A non-fatal `ESP_ROM_ELF_DIR` gdbinit warning appears during builds — safe to ignore; the build still completes.)
 
 ## Pinout
 
@@ -77,14 +79,15 @@ MPU6050 → Mahony → Euler angles (roll/pitch/yaw)
 
 **Horizontal movement** (vel_x/vel_y → flow_hold, move_to → position → flow_hold):
 ```
-Web buttons → vel_x/vel_y  ──→ flow_hold velocity PID ──→ ±5° correction to target angle
+Web buttons → vel_x/vel_y  ──→ flow_hold velocity PID ──→ ±8° correction to target angle
 P4 move_to → position PID ──→ velocity setpoint ────────→
 ```
+**Flow sign convention** (bench-verified on this airframe — depends on module mounting, recheck if remounted): pushing the drone forward gives `fx > 0`, right gives `fy > 0` — forward/right = positive flow. The API's `vel>0=forward/right` maps *directly* (no negation) to the flow_hold setpoint. The angle-direction inversion lives in one place: `flow_hold_predict()` negates its PID outputs (positive pitch angle = nose-up = backward acceleration, so intercepting forward drift needs +pitch from a negative PID error). In the IMU predict path `accel_x` is negated (IMU X points backward; a down-facing camera frame can never align with both axes of the upward-Z IMU frame) while `accel_y` feeds directly.
 Position controller uses optical flow integral as position feedback (dead-reckoning in flow units). It has two roles: **`move_to`** (one-shot move) and **position hold** (lock the current point to resist drift). In ALT_HOLD/POS_HOLD, position hold is the *default* — once airborne with good flow quality, the current x/y is captured and locked. A `move_to` runs to its target then **transitions into hold at that point** (no longer falls back to velocity=0). Web direction buttons temporarily override with manual velocity, then re-lock the new position on release. STABILIZE does not lock position (full manual).
 
 **Task layout** (dual-core FreeRTOS):
 - Core 0: WiFi protocol stack (ESP-IDF managed)
-- Core 1: `main` (100Hz), `flow_rx` (UART interrupt-driven), HTTP server (event-driven)
+- Core 1: `main` (100Hz), `flow_rx` (blocking UART read, 100ms timeout), HTTP server (event-driven)
 
 ## Key Design Decisions
 
@@ -95,6 +98,8 @@ Position controller uses optical flow integral as position feedback (dead-reckon
 - **TOF skip-counter**: VL53L1X data-ready checked every 10th call (@100Hz ≈ every 100ms) to match sensor timing budget; cached values returned otherwise.
 - **Deferred command execution**: Blocking operations (ESC calibration, gyro recalibration) are queued via `pending_cmd` and executed in the main loop context — never from the HTTP server task. This prevents WiFi/WebSocket freeze during calibration.
 - **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE; POS_HOLD adds optical-flow velocity hold on top. **Both ALT_HOLD and POS_HOLD now run the position-hold loop** (lock current x/y to resist drift, flow-quality gated). Entering an altitude mode auto-captures the target height. The flow integral is **no longer reset** on POS_HOLD entry — position hold uses the absolute integral as a relative lock reference, so resetting it would dislocate the lock point and cause a fly-away; this keeps the lock continuous across ALT_HOLD↔POS_HOLD switches.
+- **IMU+flow complementary velocity filter**: `flow_hold` is split into `flow_hold_predict()` (every 100Hz tick — EMA-filtered IMU accel, `ACCEL_EMA_ALPHA=0.3` ≈5.7Hz, integrates the velocity estimate and the velocity PID runs on it) and `flow_hold_update()` (fresh flow frames only ~50Hz — gyro-compensated flow corrects the estimate). This catches small drifts the PV3901L1 reports as zero displacement.
+- **Takeoff delayed position lock**: during the takeoff climb, position hold is suppressed (`g_position_lock_pending`) because body tilt corrupts the flow integral; the lock engages only once height error < 10cm vs `target_final_m`, |vz| < 0.15 m/s, and flow qual > 30. Telemetry `flow.ps` encodes the state: 0=idle, 1=pending, 2=hold, 3=move_to.
 - **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`, `{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}` (runtime optical-flow gyro-compensation tuning). Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
 - **Safety mechanisms**:
   - 500ms command timeout: if no WebSocket message received for >500ms → auto-DISARMED
@@ -134,7 +139,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - `mixer.h` — `mixer_apply()`
 - `commander.h` — `commander_parse()`, `commander_get_setpoint()`, `commander_reset_setpoint()`, `commander_is_command_timeout()`, `commander_clear_pending_cmd()`, `commander_mode_name()`, `setpoint_t` (includes `vel_x`, `vel_y`, `move_to_x`, `move_to_y`, `takeoff_height`, `takeoff_throttle`), `flight_mode_t`, `CMD_*` enums
 - `altitude.h` — `altitude_init()`, `altitude_update()`, `altitude_capture_target()` (hold in place), `altitude_set_target()` (ramp from current height to a final target — used by takeoff), `altitude_reset()`, `altitude_ctrl_t`
-- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_set_gyro_comp()` (gyro-comp gains, default −2.5/−2.5), `flow_hold_update()` (takes `gyro_x/gyro_y` for rotational-flow compensation), `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
+- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_set_gyro_comp()` (gyro-comp gains, default −2.5/−2.5), `flow_hold_set_imu_scale()`, `flow_hold_predict()` (every 100Hz tick: IMU accel integrates `vx_est`/`vy_est` + runs the velocity PID), `flow_hold_update()` (fresh flow frames only ~50Hz: gyro compensation then complementary-filter correction of the estimate — no PID here), `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
 - `position.h` — `position_init()`, `position_set_target()` (move_to, one-shot), `position_hold_start()` (lock current point, persistent — does not exit on reach), `position_update()`, `position_reset()`, `position_reached()`, `position_ctrl_t` (has `hold` flag distinguishing the two)
 
 **Communication:**
@@ -149,7 +154,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - **Globals**: `g_` prefix for file-static/module-level variables (e.g. `g_i2c0_bus`, `g_trim_roll`)
 - **Logging**: `static const char *TAG = "module"` then `ESP_LOGI`/`ESP_LOGW`/`ESP_LOGE`(TAG, ...)
 - **Timing**: `vTaskDelay(pdMS_TO_TICKS(10))` for 100Hz loop; `esp_timer_get_time()` for variable-rate updates (flow_hold) and command timeout
-- **JSON**: telemetry uses raw `snprintf` (not cJSON) — buffer is 640 bytes; commands use cJSON for parsing
+- **JSON**: telemetry uses raw `snprintf` (not cJSON) — buffer is 768 bytes; commands use cJSON for parsing
 
 ## Init Ordering
 
@@ -167,7 +172,7 @@ WiFi starts after motors so calibration doesn't conflict with the WiFi stack. HT
 
 - **setpoint_t** is shared between HTTP server task (writer) and main loop (reader) — no mutex
 - Commander parses JSON into a local temp, then struct-assigns to `g_sp` (narrowed race window vs. per-field writes)
-- Blocking commands (calibrate, gyro_calib, move_to, move_stop) are deferred via `pending_cmd`: HTTP task sets the flag, main loop executes it next iteration
+- Blocking commands (calibrate, gyro_calib, move_to, move_stop, takeoff) are deferred via `pending_cmd`: HTTP task sets the flag, main loop executes it next iteration
 - **500ms timeout**: `g_last_command_us` timestamp updated on each valid WebSocket parse; main loop checks `commander_is_command_timeout()` → auto-DISARMED
 - **Disconnect safety**: when all WS clients disconnect, `ws_disconnect_cb` fires `commander_reset_setpoint()` — cleans both `g_sp` and the timestamp
 - `pv3901l1_data_t` is filled by the `flow_rx` FreeRTOS task (Core 1, priority 10, 100ms UART poll), consumed by main loop

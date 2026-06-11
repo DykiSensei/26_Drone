@@ -221,7 +221,8 @@ void app_main(void)
     /* --- Main loop: 100Hz --- */
     mpu6050_data_t imu;
     uint16_t        tof_mm = 0;
-    pv3901l1_data_t flow;
+    pv3901l1_data_t flow = {0};   /* 必须清零：首帧光流到达前 get_data 不写入，
+                                   * 否则 qual/积分读到栈上垃圾值 */
     float roll = 0, pitch = 0, yaw = 0;
     float pid_r = 0, pid_p = 0, pid_y = 0;
     char  json[768];
@@ -262,8 +263,9 @@ void app_main(void)
 
         /* 水平控制优先级（仅 ALT_HOLD / POS_HOLD 生效）：
          *   move_to 一次性移动 > Web 速度按钮 > 位置保持(默认，对抗漂移)
-         * API: vel>0=前/右。flow_hold 用 +flow 测量(setpoint=0=静止保持)，
-         * setpoint>0 直接表示前/右意图，无需取反 */
+         * 符号约定（本机实测）：前推 fx>0、右推 fy>0，前/右 = 光流正方向。
+         * API 的 vel>0=前/右 直接作为正 setpoint 送入 flow_hold，无需取反
+         * （朝向修正角的反号在 flow_hold_predict 输出处统一处理）。 */
         float vel_cmd_x = 0.0f, vel_cmd_y = 0.0f;
 
         if (!alt_mode_h) {
@@ -284,10 +286,11 @@ void app_main(void)
                 vel_cmd_y = g_position.out_vy;
             }
         } else if (web_vel) {
-            /* 手动速度优先：暂停位置保持，松手后默认分支在当前点重捕获 */
+            /* 手动速度优先：暂停位置保持，松手后默认分支在当前点重捕获。
+             * 此处取反曾是 49d7b3f 翻转符号约定后的漏改残留。 */
             if (g_position.active) position_reset(&g_position);
-            vel_cmd_x = -(sp->vel_x * 80.0f);
-            vel_cmd_y = -(sp->vel_y * 80.0f);
+            vel_cmd_x = sp->vel_x * 80.0f;
+            vel_cmd_y = sp->vel_y * 80.0f;
         } else {
             /* 默认：位置保持，锁定当前点对抗漂移。
              *  - flow.qual 阈值降到 30 配合 flow_hold 软启动
@@ -315,7 +318,12 @@ void app_main(void)
          * accel_x/y 直接当世界系水平加速度用（小角度悬停 cos<10° → 误差 <3%）。 */
         g_ax_filt += ACCEL_EMA_ALPHA * (imu.accel_x - g_ax_filt);
         g_ay_filt += ACCEL_EMA_ALPHA * (imu.accel_y - g_ay_filt);
-        flow_hold_predict(&g_flow_hold, g_ax_filt, g_ay_filt, dt);
+        /* accel_x 取反：IMU（Z 朝上）和下视光流相机两套右手系的 x/y 轴
+         * 不可能同时同向，必然恰好有一轴反向。本机实测光流 前/右 = 正，
+         * 而 IMU 安装 X 朝后（由 rate 环符号 + mixer 约定反推）：
+         * accel_x = -前向加速度 → x 轴取反；accel_y = +右向加速度 → 同向。
+         * 接错则 predict 与光流校正互相拉扯，速度估计振荡。 */
+        flow_hold_predict(&g_flow_hold, -g_ax_filt, g_ay_filt, dt);
 
         if (flow_new == 0) {
             flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
@@ -451,8 +459,13 @@ void app_main(void)
                 float target_roll_angle  = sp->roll  * MAX_ANGLE_DEG;
                 float target_pitch_angle = sp->pitch * MAX_ANGLE_DEG;
 
-                /* 光流漂移修正：叠加速度环输出 */
-                if (flow_hold_is_active(&g_flow_hold)) {
+                /* 光流漂移修正：仅在定高/定点模式或有手动速度指令时叠加。
+                 * STABILIZE 纯手动：无 vel 指令时不能叠加，否则速度环
+                 * (setpoint=0) 会以 ±8° 权限对抗飞手摇杆。 */
+                bool flow_corr_en = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD)
+                                  || (fabsf(sp->vel_x) > 0.01f)
+                                  || (fabsf(sp->vel_y) > 0.01f);
+                if (flow_corr_en && flow_hold_is_active(&g_flow_hold)) {
                     target_roll_angle  += g_flow_hold.out_roll_deg;
                     target_pitch_angle += g_flow_hold.out_pitch_deg;
                 }

@@ -266,7 +266,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `CLAUDE.md`。
 | Angle P | 6.0×DEG2RAD | — | — | ±30° | — |
 | Altitude | 0.25 | 0.02 | 0.0 | ±0.3 油门 | 0.15 |
 | Flow Velocity | 0.4 | 0.06 | 0.0 | ±8° | 6° |
-| Position | 0.5 | 0.02 | 0.0 | ±80 flow | 30 |
+| Position | 0.15 | 0.02 | 0.0 | ±20 flow | 30 |
 
 > Altitude 另含 **vz 垂直速度阻尼**（KD_VZ=0.5，IMU/TOF 互补滤波）+ **起飞目标斜坡**（0.3 m/s）。
 > Flow Velocity 跑在 **IMU+光流互补滤波速度估计**上：IMU 加速度 EMA 滤波后做 100Hz 预测（积分 + 慢衰减），新光流帧（~50Hz）做修正。
