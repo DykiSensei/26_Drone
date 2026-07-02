@@ -46,12 +46,16 @@ static esp_err_t ws_handler(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "ws_handler: method=%d uri=%s", req->method, req->uri);
     if (req->method == HTTP_GET) {
-        /* New WS connection — store fd */
-        if (g_ws_count < WS_MAX_CLIENTS) {
-            g_ws_fds[g_ws_count++] = httpd_req_to_sockfd(req);
-            ESP_LOGI(TAG, "WS client connected (fd=%d, total=%d)",
-                     httpd_req_to_sockfd(req), g_ws_count);
+        /* New WS connection — store fd. 满员必须拒绝（返回错误关闭连接）：
+         * 不入列表的客户端能发控制命令却不参与"全断开→DISARM"安全统计 */
+        if (g_ws_count >= WS_MAX_CLIENTS) {
+            ESP_LOGW(TAG, "WS client limit (%d) reached — rejecting fd=%d",
+                     WS_MAX_CLIENTS, httpd_req_to_sockfd(req));
+            return ESP_FAIL;
         }
+        g_ws_fds[g_ws_count++] = httpd_req_to_sockfd(req);
+        ESP_LOGI(TAG, "WS client connected (fd=%d, total=%d)",
+                 httpd_req_to_sockfd(req), g_ws_count);
         return ESP_OK;
     }
 
@@ -124,6 +128,7 @@ int http_server_init(void)
     cfg.server_port = 80;
     cfg.max_open_sockets = WS_MAX_CLIENTS + 2;
     cfg.close_fn = ws_close_handler;
+    cfg.send_wait_timeout = 1;   /* 卡死的客户端最多拖住 httpd 任务 1s（默认 5s） */
 
     esp_err_t ret = httpd_start(&g_server, &cfg);
     if (ret != ESP_OK) {
@@ -157,15 +162,20 @@ int http_server_init(void)
     return 0;
 }
 
-void http_server_broadcast(const char *json_str)
-{
-    if (!g_server || !json_str) return;
-    if (g_ws_count == 0) return;
+/* ---- 异步广播 ----
+ * 发送必须在 httpd 任务里做，不能在主循环（调用方）上下文直接发：
+ * httpd_ws_send_frame_async 实际是同步写 socket，WiFi 拥塞/客户端卡顿时
+ * 会阻塞调用者 —— 控制循环停摆期间电机保持旧 PWM，等效失控。
+ * 顺带消除 g_ws_fds 竞态：连接/断开/发送失败移除现在都发生在 httpd 任务。 */
+static char          g_bcast_buf[768];
+static volatile bool g_bcast_inflight = false;
 
+static void bcast_work(void *arg)
+{
     httpd_ws_frame_t ws_pkt = {
         .type    = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)json_str,
-        .len     = strlen(json_str),
+        .payload = (uint8_t *)g_bcast_buf,
+        .len     = strlen(g_bcast_buf),
     };
 
     int i = 0;
@@ -179,4 +189,22 @@ void http_server_broadcast(const char *json_str)
         }
     }
     check_all_disconnected();
+    g_bcast_inflight = false;
+}
+
+void http_server_broadcast(const char *json_str)
+{
+    if (!g_server || !json_str) return;
+    if (g_ws_count == 0) return;
+    if (g_bcast_inflight) return;   /* 上一帧还没发完 — 丢弃本帧，绝不等待 */
+
+    size_t n = strlen(json_str);
+    if (n >= sizeof(g_bcast_buf)) n = sizeof(g_bcast_buf) - 1;
+    memcpy(g_bcast_buf, json_str, n);
+    g_bcast_buf[n] = '\0';
+
+    g_bcast_inflight = true;
+    if (httpd_queue_work(g_server, bcast_work, NULL) != ESP_OK) {
+        g_bcast_inflight = false;
+    }
 }

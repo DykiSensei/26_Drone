@@ -2,13 +2,15 @@
 #include "esp_timer.h"
 #include <math.h>
 
-/* 光流信号幅度很小（实测 30cm 平移 comp 才 <10），故 KP 取大值，
- * 否则纠偏角小到可忽略、拦不住漂移。 */
-#define FLOW_KP              0.40f  /* comp≈10 → ~4° 纠偏 */
-#define FLOW_KI              0.06f  /* 积分消除持续漂移/机身固有偏移 */
+/* 速度环 PID —— 全链路米制化后增益含义固定：修正角(deg) per 速度误差(m/s)。
+ * 旧实现直接消费 flow 原始单位，同样的物理速度在 10cm 高度产生的读数是
+ * 50cm 高度的 5 倍 → 等效环增益随高度漂移 5~10 倍，定点只在调参高度稳、
+ * 起飞爬升期（高度剧变）必然失配。 */
+#define FLOW_KP              8.0f   /* 0.2 m/s 漂移 → 1.6° 纠偏 */
+#define FLOW_KI              1.2f   /* 积分消除持续漂移/机身固有偏移 */
 #define FLOW_KD              0.0f
 #define FLOW_OUTPUT_LIMIT    8.0f   /* 最大 ±8° 修正角 */
-#define FLOW_INTEGRAL_LIMIT  6.0f   /* 积分权限（°） */
+#define FLOW_INTEGRAL_LIMIT  3.0f   /* 积分状态上限 (m/s·s)：KI×3 ≈ 3.6° 权限 */
 /* 连续 quality 门限：30 起步介入（低权重），80 满权。
  * 原 binary 50 切断在 qual 30-50 徘徊时完全无位置控制 → 漂走才锁。 */
 #define FLOW_QUALITY_LOW     30
@@ -17,17 +19,23 @@
 #define FLOW_MAX_HEIGHT_M    3.0f
 #define FLOW_QUALITY_SMOOTH  0.3f
 
-#define FLOW_VEL_SMOOTH 0.3f   /* 速度 EMA 平滑系数 */
-#define FLOW_DEADBAND   0.3f   /* 速度死区：抗陀螺补偿残差噪声，但小到不清掉真实小漂移 */
+#define FLOW_VEL_SMOOTH 0.3f    /* 速度 EMA 平滑系数 */
+#define FLOW_DEADBAND   0.02f   /* m/s 死区：抗陀螺补偿残差噪声，2cm/s 以下视为静止 */
 
 /* --- IMU + 光流 互补滤波参数 ---
  * 高频快通道：IMU 加速度积分（短期响应快，长期偏置漂移）
- * 低频绝对通道：光流速度测量（50Hz 离散，绝对参考但延迟）
- * predict 每帧推进 vx_est，update 用 flow 拉回 → 高频细节 + 长期不漂。
- * 这是修复"模块连续两帧位移太小输出 0 → flow_x_i 不增长 → Pos Err 恒 0"的关键。 */
+ * 低频绝对通道：光流米制速度（离散帧，绝对参考但延迟）
+ * 米制统一后两通道量纲一致（m/s），不再需要经验性的 imu_scale。 */
 #define IMU_LEAK         0.999f  /* 每帧慢衰减，防 accel 偏置积爆（τ≈10s @100Hz） */
 #define FLOW_CORRECT_K   0.30f   /* flow 修正强度：新 flow 帧把 vx_est 拉向测量值的比例 */
-#define IMU_SCALE_DEFAULT 1.0f   /* m/s² → flow_unit/s²；需要试飞标定，默认 1.0 */
+
+/* 米制换算：v(m/s) = counts × FLOW_SCALE(rad/count) × height(m) / dt_frame(s)。
+ * PMW3901 系光学参数（4.2° FOV / 30 px）≈ 0.00244 rad/count，
+ * PV3901L1 疑似同系，实际系数经 {"cmd":"flow_comp","scale":..} 试飞标定。 */
+#define FLOW_SCALE_DEFAULT   0.00244f
+#define FRAME_DT_MIN         0.005f  /* 帧间隔钳位 (s) */
+#define FRAME_DT_MAX         0.05f
+#define FRAME_DT_DEFAULT     0.01f
 
 void flow_hold_init(flow_hold_t *fh)
 {
@@ -44,29 +52,38 @@ void flow_hold_init(flow_hold_t *fh)
     fh->active = false;
     fh->gyro_kx = 0.0f;
     fh->gyro_ky = 0.0f;
+    fh->flow_scale = FLOW_SCALE_DEFAULT;
     fh->flow_x_f = 0.0f;
     fh->flow_y_f = 0.0f;
     fh->flow_x_comp = 0.0f;
     fh->flow_y_comp = 0.0f;
     fh->vx_est = 0.0f;
     fh->vy_est = 0.0f;
-    fh->imu_scale = IMU_SCALE_DEFAULT;
+    fh->pos_x_m = 0.0f;
+    fh->pos_y_m = 0.0f;
     fh->flow_x_corr = 0.0f;
     fh->flow_y_corr = 0.0f;
 }
 
-void flow_hold_set_imu_scale(flow_hold_t *fh, float scale)
+void flow_hold_set_flow_scale(flow_hold_t *fh, float scale)
 {
-    fh->imu_scale = scale;
+    if (scale > 0.0f) fh->flow_scale = scale;
 }
 
 void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt)
 {
-    /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆） */
-    fh->vx_est = (fh->vx_est + fh->imu_scale * ax_world * dt) * IMU_LEAK;
-    fh->vy_est = (fh->vy_est + fh->imu_scale * ay_world * dt) * IMU_LEAK;
+    /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆）。米制统一后
+     * m/s² × s 直接得 m/s，与光流通道量纲一致。 */
+    fh->vx_est = (fh->vx_est + ax_world * dt) * IMU_LEAK;
+    fh->vy_est = (fh->vy_est + ay_world * dt) * IMU_LEAK;
 
-    /* PID 100Hz 更新（比原来 update 里 50Hz 多一倍带宽，能跟住 IMU 高频信息）。
+    /* 航位推算位置（m）：积分融合速度。position 环用它做锁定反馈——
+     * 比旧的裸 flow 积分好在：米制（不随高度变尺度）、含 IMU 高频信息、
+     * 低质量时 vx_est 自然衰减 → 位置冻结而不是积累噪声。 */
+    fh->pos_x_m += fh->vx_est * dt;
+    fh->pos_y_m += fh->vy_est * dt;
+
+    /* PID 100Hz 更新（比 flow 帧率高的带宽，能跟住 IMU 高频信息）。
      * 低 quality 时冻结积分，避免噪声 windup。
      * 输出取反（关键符号）：本机实测 前推 fx>0、右推 fy>0（取决于光流模块
      * 安装方向，换装后需重新核对），即 前/右 = 光流正方向。而正 pitch 角 =
@@ -115,17 +132,29 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
     }
     fh->quality_gain += FLOW_QUALITY_SMOOTH * (q_target - fh->quality_gain);
 
-    fh->last_update_us = esp_timer_get_time();
+    /* 帧间隔实测（米制换算的分母）：模块帧率会随环境变化，不能假定常数 */
+    int64_t now = esp_timer_get_time();
+    float dt_frame = (fh->last_update_us == 0)
+                   ? FRAME_DT_DEFAULT
+                   : (float)(now - fh->last_update_us) * 1e-6f;
+    if (dt_frame < FRAME_DT_MIN) dt_frame = FRAME_DT_MIN;
+    if (dt_frame > FRAME_DT_MAX) dt_frame = FRAME_DT_MAX;
+    fh->last_update_us = now;
 
     if (valid) {
-        /* 陀螺补偿：扣除姿态变化引起的旋转光流，只留平移分量。
+        /* 陀螺补偿：在 counts/帧 域内做（kx/ky 为该域的实测标定值）。
          * pitch rate(gyro_y) 污染 x 轴光流，roll rate(gyro_x) 污染 y 轴 */
         float fx = (float)flow_x - fh->gyro_kx * gyro_y;
         float fy = (float)flow_y - fh->gyro_ky * gyro_x;
 
+        /* 米制换算：v = counts × (rad/count) × 高度 / 帧间隔 */
+        float k_m = fh->flow_scale * height_m / dt_frame;
+        float vx_m = fx * k_m;
+        float vy_m = fy * k_m;
+
         /* 速度 EMA 平滑（裸 flow 噪声大） */
-        fh->flow_x_f += FLOW_VEL_SMOOTH * (fx - fh->flow_x_f);
-        fh->flow_y_f += FLOW_VEL_SMOOTH * (fy - fh->flow_y_f);
+        fh->flow_x_f += FLOW_VEL_SMOOTH * (vx_m - fh->flow_x_f);
+        fh->flow_y_f += FLOW_VEL_SMOOTH * (vy_m - fh->flow_y_f);
 
         /* 死区：静止小信号清零 → 防止光流残留噪声被当成真实运动 */
         float fxd = (fabsf(fh->flow_x_f) < FLOW_DEADBAND) ? 0.0f : fh->flow_x_f;
@@ -151,6 +180,7 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
 
 void flow_hold_reset(flow_hold_t *fh)
 {
+    /* 注意：不复位 gyro_kx/ky 和 flow_scale —— 都是标定值，跨解锁保留 */
     pid_reset(&fh->pid_vx);
     pid_reset(&fh->pid_vy);
     fh->setpoint_vx   = 0.0f;
@@ -164,6 +194,8 @@ void flow_hold_reset(flow_hold_t *fh)
     fh->flow_y_f = 0.0f;
     fh->vx_est = 0.0f;
     fh->vy_est = 0.0f;
+    fh->pos_x_m = 0.0f;
+    fh->pos_y_m = 0.0f;
     fh->flow_x_corr = 0.0f;
     fh->flow_y_corr = 0.0f;
 }

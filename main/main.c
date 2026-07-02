@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "i2c_bus.h"
 #include "mpu6050.h"
 #include "tof400f.h"
@@ -30,6 +31,9 @@ static const char *TAG = "main";
 /* 自稳外环参数 */
 #define MAX_ANGLE_DEG   30.0f                   /* 最大倾斜角 ±30° */
 #define ANGLE_KP        (6.0f * 0.017453293f)   /* ≈0.105 rad/s 每度误差 */
+
+/* Web 方向按钮满偏对应的水平速度指令 (m/s)。按钮发 ±0.5 → ±0.3 m/s */
+#define MANUAL_VEL_MS   0.6f
 
 static pid_t pid_roll, pid_pitch, pid_yaw;
 static float g_motor_out[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -59,8 +63,23 @@ static void on_all_clients_disconnected(void)
     ESP_LOGW(TAG, "All WS clients disconnected — forcing DISARMED");
 }
 
+/* 只允许在地面（DISARMED）执行的命令：校准会阻塞主循环数秒甚至把电机打到
+ * 满油门（ESC 校准），飞行中触发等于炸机；水平修正类飞行中触发会把当前
+ * 飞行姿态当成"水平"，同样危险。 */
+static bool cmd_requires_disarmed(commander_cmd_t cmd)
+{
+    return cmd == CMD_CALIBRATE || cmd == CMD_GYRO_CALIB
+        || cmd == CMD_CALIBRATE_MOTOR
+        || cmd == CMD_LEVEL_TRIM || cmd == CMD_RESET_TRIM;
+}
+
 static void execute_pending_cmd(const setpoint_t *sp)
 {
+    if (cmd_requires_disarmed(sp->pending_cmd) && sp->mode != MODE_DISARMED) {
+        ESP_LOGE(TAG, "cmd %d rejected: calibration/trim only allowed in DISARMED",
+                 sp->pending_cmd);
+        return;
+    }
     switch (sp->pending_cmd) {
     case CMD_CALIBRATE:
         ESP_LOGW(TAG, "ESC calibration triggered from web");
@@ -92,7 +111,7 @@ static void execute_pending_cmd(const setpoint_t *sp)
     }
     case CMD_MOVE_TO:
         g_move_to_pending = true;
-        ESP_LOGW(TAG, "move_to: x=%.1f y=%.1f (flow units)", sp->move_to_x, sp->move_to_y);
+        ESP_LOGW(TAG, "move_to: x=%.2f y=%.2f (m)", sp->move_to_x, sp->move_to_y);
         break;
     case CMD_MOVE_STOP:
         g_move_stop_pending = true;
@@ -134,7 +153,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
         "\"alt\":{\"target\":%.2f,\"out\":%.3f,\"vz\":%.2f},"
-        "\"flow\":{\"x\":%.1f,\"y\":%.1f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.1f,\"cy\":%.1f,\"ps\":%d,\"tx\":%.0f,\"ty\":%.0f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.1f,\"vy\":%.1f},"
+        "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.2f,\"cy\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.2f,\"vy\":%.2f},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
@@ -146,7 +165,7 @@ static void build_telemetry(char *buf, size_t sz,
         roll, pitch, yaw,
         tof_mm,
         g_alt.target_m, g_alt_out, g_alt.vz,
-        flow->flow_x_i, flow->flow_y_i, flow->qual,
+        g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, flow->qual,
         g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
         g_flow_hold.flow_x_comp, g_flow_hold.flow_y_comp,
         pos_state, g_position.target_x, g_position.target_y,
@@ -219,17 +238,44 @@ void app_main(void)
     printf("=== Ready: connect to Drone WiFi, open http://192.168.4.1 ===\n");
 
     /* --- Main loop: 100Hz --- */
-    mpu6050_data_t imu;
+    mpu6050_data_t imu = {0};   /* 读失败时保留上一帧有效值（冻结而非清零），
+                                 * 避免 gyro=0 假反馈让角速率环输出扭矩突跳 */
+    mpu6050_data_t imu_new;
+    int             imu_fail = 0;
+    int             telem_div = 0;
     uint16_t        tof_mm = 0;
     pv3901l1_data_t flow = {0};   /* 必须清零：首帧光流到达前 get_data 不写入，
                                    * 否则 qual/积分读到栈上垃圾值 */
     float roll = 0, pitch = 0, yaw = 0;
     float pid_r = 0, pid_p = 0, pid_y = 0;
     char  json[768];
-    const float dt = 0.01f;
+
+    /* 固定节拍 + 实测 dt：vTaskDelayUntil 保证周期不被循环执行时间拉长，
+     * 积分器用实测 dt 消除残余抖动（旧 vTaskDelay + 硬编码 0.01 会让实际
+     * 周期 = 10ms + 执行时间，所有积分系统性偏大）。 */
+    TickType_t last_wake = xTaskGetTickCount();
+    int64_t    prev_us   = esp_timer_get_time();
 
     while (1) {
-        mpu6050_read(&imu);
+        int64_t now_us = esp_timer_get_time();
+        float dt = (float)(now_us - prev_us) * 1e-6f;
+        prev_us = now_us;
+        if (dt < 0.005f) dt = 0.005f;
+        if (dt > 0.03f)  dt = 0.03f;
+
+        if (mpu6050_read(&imu_new) == 0) {
+            imu = imu_new;
+            imu_fail = 0;
+        } else if (imu_fail < 1000) {
+            imu_fail++;
+        }
+        /* IMU 失效保护：连续 200ms 读不到数据 → 姿态反馈不可信，继续飞
+         * 就是开环失控，强制 DISARMED（重新上锁尝试也会被立刻再锁）。 */
+        if (imu_fail >= 20 && commander_get_setpoint()->mode != MODE_DISARMED) {
+            ESP_LOGE(TAG, "IMU failure (%d consecutive reads) — forcing DISARMED", imu_fail);
+            commander_reset_setpoint();
+        }
+
         tof400f_get_distance(&tof_mm);
 #if FLOW_ENABLED
         int flow_new = pv3901l1_get_data(&flow);
@@ -253,7 +299,7 @@ void app_main(void)
         if (g_move_to_pending) {
             position_set_target(&g_position,
                                 sp->move_to_x, sp->move_to_y,
-                                flow.flow_x_i, flow.flow_y_i);
+                                g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
             g_move_to_pending = false;
         }
         if (g_move_stop_pending) {
@@ -263,52 +309,55 @@ void app_main(void)
 
         /* 水平控制优先级（仅 ALT_HOLD / POS_HOLD 生效）：
          *   move_to 一次性移动 > Web 速度按钮 > 位置保持(默认，对抗漂移)
-         * 符号约定（本机实测）：前推 fx>0、右推 fy>0，前/右 = 光流正方向。
-         * API 的 vel>0=前/右 直接作为正 setpoint 送入 flow_hold，无需取反
-         * （朝向修正角的反号在 flow_hold_predict 输出处统一处理）。 */
+         * 全链路米制：位置反馈用 flow_hold 的航位推算 pos_x_m/pos_y_m (m)，
+         * 速度指令统一 m/s。符号约定（本机实测）：前推 fx>0、右推 fy>0，
+         * 前/右 = 光流正方向。API 的 vel>0=前/右 直接作为正 setpoint 送入
+         * flow_hold，无需取反（朝向修正角的反号在 flow_hold_predict 输出处
+         * 统一处理）。 */
         float vel_cmd_x = 0.0f, vel_cmd_y = 0.0f;
 
         if (!alt_mode_h) {
             /* STABILIZE 等：交还飞手，不做位置保持 */
             if (g_position.active) position_reset(&g_position);
             if (web_vel) {
-                vel_cmd_x = sp->vel_x * 80.0f;
-                vel_cmd_y = sp->vel_y * 80.0f;
+                vel_cmd_x = sp->vel_x * MANUAL_VEL_MS;
+                vel_cmd_y = sp->vel_y * MANUAL_VEL_MS;
             }
         } else if (g_position.active && !g_position.hold) {
             /* move_to 进行中：到达后转为在该点持续位置保持 */
-            position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
-            if (position_reached(&g_position, flow.flow_x_i, flow.flow_y_i)) {
+            position_update(&g_position, g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, dt);
+            if (position_reached(&g_position)) {
                 ESP_LOGW(TAG, "move_to reached -> position hold");
-                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
+                position_hold_start(&g_position, g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
             } else {
                 vel_cmd_x = g_position.out_vx;
                 vel_cmd_y = g_position.out_vy;
             }
         } else if (web_vel) {
-            /* 手动速度优先：暂停位置保持，松手后默认分支在当前点重捕获。
-             * 此处取反曾是 49d7b3f 翻转符号约定后的漏改残留。 */
+            /* 手动速度优先：暂停位置保持，松手后默认分支在当前点重捕获 */
             if (g_position.active) position_reset(&g_position);
-            vel_cmd_x = sp->vel_x * 80.0f;
-            vel_cmd_y = sp->vel_y * 80.0f;
+            vel_cmd_x = sp->vel_x * MANUAL_VEL_MS;
+            vel_cmd_y = sp->vel_y * MANUAL_VEL_MS;
         } else {
             /* 默认：位置保持，锁定当前点对抗漂移。
              *  - flow.qual 阈值降到 30 配合 flow_hold 软启动
              *  - takeoff 上升期 (g_position_lock_pending=true) 跳过自动锁定，
-             *    等达到目标高度后由下方"达标后启动"逻辑统一处理 */
+             *    此期间速度环 (setpoint=0) 仍全程压制水平漂移——米制化后
+             *    速度环增益在低空/爬升段不再失配，这才是垂直起飞的关键 */
             if (!g_position.active && !g_position_lock_pending && flow.qual > 30) {
-                position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
-                ESP_LOGW(TAG, "position hold @ (%.0f, %.0f)",
-                         flow.flow_x_i, flow.flow_y_i);
+                position_hold_start(&g_position, g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
+                ESP_LOGW(TAG, "position hold @ (%.2f, %.2f) m",
+                         g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
             }
             if (g_position.active) {
-                position_update(&g_position, flow.flow_x_i, flow.flow_y_i, dt);
+                position_update(&g_position, g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, dt);
                 vel_cmd_x = g_position.out_vx;
                 vel_cmd_y = g_position.out_vy;
             }
         }
         flow_hold_set_velocity(&g_flow_hold, vel_cmd_x, vel_cmd_y);
         flow_hold_set_gyro_comp(&g_flow_hold, sp->flow_kx, sp->flow_ky);
+        flow_hold_set_flow_scale(&g_flow_hold, sp->flow_scale);
 
         /* IMU + 光流 互补滤波：
          *   - predict 每帧（100Hz）跑：IMU 加速度积分 → vx_est，并跑 PID 算修正角
@@ -357,15 +406,12 @@ void app_main(void)
             execute_pending_cmd(sp);
             commander_clear_pending_cmd();
         }
-        if (sp->motor_active) {
-            /* 手动电机控制也必须检查 DISARMED 和油门安全 */
-            if (sp->mode == MODE_DISARMED || sp->throttle < 0.05f) {
-                motor_stop();
-                memset(g_motor_out, 0, sizeof(g_motor_out));
-            } else {
-                motor_set(sp->motor);
-                memcpy(g_motor_out, sp->motor, sizeof(g_motor_out));
-            }
+        if (sp->mode == MODE_DISARMED && sp->motor_active) {
+            /* 台架电机测试：只在 DISARMED（锁定）下生效，飞行模式下 motor
+             * 数组被完全忽略。旧逻辑相反（armed 才生效），导致前端 All MAX
+             * 按钮在飞行中等于四电机满油门指令。 */
+            motor_set(sp->motor);
+            memcpy(g_motor_out, sp->motor, sizeof(g_motor_out));
         } else if (sp->mode == MODE_DISARMED) {
             motor_stop();
             memset(g_motor_out, 0, sizeof(g_motor_out));
@@ -442,9 +488,9 @@ void app_main(void)
                     bool reached = fabsf(current_m - g_alt.target_final_m) < 0.10f;
                     bool steady  = fabsf(g_alt.vz) < 0.15f;
                     if (reached && steady && flow.qual > 30) {
-                        position_hold_start(&g_position, flow.flow_x_i, flow.flow_y_i);
-                        ESP_LOGW(TAG, "Reached target -> position lock @ (%.0f, %.0f)",
-                                 flow.flow_x_i, flow.flow_y_i);
+                        position_hold_start(&g_position, g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
+                        ESP_LOGW(TAG, "Reached target -> position lock @ (%.2f, %.2f) m",
+                                 g_flow_hold.pos_x_m, g_flow_hold.pos_y_m);
                         g_position_lock_pending = false;
                     }
                 }
@@ -518,10 +564,15 @@ void app_main(void)
 
         g_prev_mode = sp->mode;
 
-        build_telemetry(json, sizeof(json), &imu, roll, pitch, yaw,
-                        tof_mm, &flow, pid_r, pid_p, pid_y);
-        http_server_broadcast(json);
+        /* 遥测 20Hz（每 5 拍一次）+ http_server 内部异步发送：全速 100Hz
+         * 同步发送在 WiFi 拥塞时会阻塞控制循环 —— 电机保持旧 PWM，等效失控 */
+        if (++telem_div >= 5) {
+            telem_div = 0;
+            build_telemetry(json, sizeof(json), &imu, roll, pitch, yaw,
+                            tof_mm, &flow, pid_r, pid_p, pid_y);
+            http_server_broadcast(json);
+        }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
     }
 }

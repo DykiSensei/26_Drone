@@ -23,6 +23,7 @@ static setpoint_t g_sp = {
     .move_to_y    = 0.0f,
     .flow_kx      = -2.5f,  /* 陀螺补偿默认值（2026-06 实测标定） */
     .flow_ky      = -2.5f,
+    .flow_scale   = 0.00244f, /* 米制换算 rad/count（PMW3901 系理论值，待试飞标定） */
     .pending_cmd  = CMD_NONE,
 };
 
@@ -126,10 +127,11 @@ void commander_parse(const char *json, int len)
             }
         }
         else if (strcmp(item->valuestring, "move_to") == 0) {
+            /* 偏移单位：米（米制化后与真实距离一致） */
             cJSON *x = cJSON_GetObjectItem(root, "x");
             cJSON *y = cJSON_GetObjectItem(root, "y");
-            if (cJSON_IsNumber(x)) sp.move_to_x = (float)x->valuedouble;
-            if (cJSON_IsNumber(y)) sp.move_to_y = (float)y->valuedouble;
+            if (cJSON_IsNumber(x)) sp.move_to_x = clamp((float)x->valuedouble, -3.0f, 3.0f);
+            if (cJSON_IsNumber(y)) sp.move_to_y = clamp((float)y->valuedouble, -3.0f, 3.0f);
             sp.pending_cmd = CMD_MOVE_TO;
         }
         else if (strcmp(item->valuestring, "move_stop") == 0) {
@@ -158,11 +160,15 @@ void commander_parse(const char *json, int len)
             sp.yaw      = 0.0f;
         }
         else if (strcmp(item->valuestring, "flow_comp") == 0) {
-            /* 光流陀螺补偿系数标定（非阻塞，直接经 setpoint 传给主循环） */
+            /* 光流标定（非阻塞，直接经 setpoint 传给主循环）：
+             * kx/ky 陀螺补偿系数；scale 米制换算系数 rad/count */
             cJSON *kx = cJSON_GetObjectItem(root, "kx");
             cJSON *ky = cJSON_GetObjectItem(root, "ky");
+            cJSON *sc = cJSON_GetObjectItem(root, "scale");
             if (cJSON_IsNumber(kx)) sp.flow_kx = (float)kx->valuedouble;
             if (cJSON_IsNumber(ky)) sp.flow_ky = (float)ky->valuedouble;
+            if (cJSON_IsNumber(sc))
+                sp.flow_scale = clamp((float)sc->valuedouble, 0.0005f, 0.02f);
         }
     }
 
@@ -213,8 +219,9 @@ void commander_reset_setpoint(void)
         .takeoff_throttle = 0.4f,
         .pending_cmd  = CMD_NONE,
     };
-    safe.flow_kx = g_sp.flow_kx;  /* 保留陀螺补偿标定值，不被失控复位清掉 */
+    safe.flow_kx = g_sp.flow_kx;  /* 保留光流标定值，不被失控复位清掉 */
     safe.flow_ky = g_sp.flow_ky;
+    safe.flow_scale = g_sp.flow_scale;
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");

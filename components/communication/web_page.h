@@ -89,18 +89,19 @@
 "<div class=\"data-row\"><span>Vz</span><span id=\"alt-vz\">0.00 m/s</span></div>\n" \
 "</div>\n" \
 "<div class=\"panel\"><h3>Optical Flow Position</h3>\n" \
-"<div class=\"data-row\"><span>X</span><span id=\"flow-x\">0.0</span></div>\n" \
-"<div class=\"data-row\"><span>Y</span><span id=\"flow-y\">0.0</span></div>\n" \
+"<div class=\"data-row\"><span>X (m)</span><span id=\"flow-x\">0.00</span></div>\n" \
+"<div class=\"data-row\"><span>Y (m)</span><span id=\"flow-y\">0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Qual</span><span id=\"flow-qual\">0</span></div>\n" \
 "<div class=\"data-row\"><span>Module FPS / Err</span><span id=\"flow-fps\">-- / --</span></div>\n" \
 "<div class=\"data-row\"><span>Raw fx/fy (本帧)</span><span id=\"flow-raw\">0 / 0</span></div>\n" \
-"<div class=\"data-row\"><span>Vel vx/vy (融合)</span><span id=\"flow-vel\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Vel vx/vy (m/s)</span><span id=\"flow-vel\">0.00 / 0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Pos State</span><span id=\"flow-ps\">idle</span></div>\n" \
-"<div class=\"data-row\"><span>Lock Target X/Y</span><span id=\"flow-tgt\">-- / --</span></div>\n" \
-"<div class=\"data-row\"><span>Pos Err X/Y</span><span id=\"flow-perr\">-- / --</span></div>\n" \
+"<div class=\"data-row\"><span>Lock Target X/Y (m)</span><span id=\"flow-tgt\">-- / --</span></div>\n" \
+"<div class=\"data-row\"><span>Pos Err X/Y (m)</span><span id=\"flow-perr\">-- / --</span></div>\n" \
 "<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
-"<div class=\"data-row\"><span>Comp x/y (单帧)</span><span id=\"flow-comp\">0.0 / 0.0</span></div>\n" \
+"<div class=\"data-row\"><span>Comp x/y (m/s)</span><span id=\"flow-comp\">0.00 / 0.00</span></div>\n" \
 "<div class=\"data-row\"><span>GyroComp Kx/Ky</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
+"<div class=\"data-row\"><span>FlowScale (rad/cnt)</span><span><input id=\"gk-s\" type=\"number\" step=\"0.0002\" value=\"0.00244\" style=\"width:70px\"></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
 "<div class=\"controls\">\n" \
@@ -170,7 +171,7 @@
 "</div>\n" \
 "</div>\n" \
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
-"<h3>Motor PWM</h3>\n" \
+"<h3>Motor PWM <span style=\"font-size:10px;color:#f85149\">(测试仅限锁定模式)</span></h3>\n" \
 "<div style=\"display:flex;justify-content:space-between;font-size:12px;font-family:monospace;color:#7ee787\">\n" \
 "<span>M1:<span id=\"mot-0\">0</span>%</span><span>M2:<span id=\"mot-1\">0</span>%</span><span>M3:<span id=\"mot-2\">0</span>%</span><span>M4:<span id=\"mot-3\">0</span>%</span>\n" \
 "</div>\n" \
@@ -210,7 +211,7 @@
 "if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
 "if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';$('alt-out').textContent=d.alt.out.toFixed(3);if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
-"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(1);$('flow-y').textContent=d.flow.y.toFixed(1);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(1)+' / '+d.flow.cy.toFixed(1);if(d.flow.fc!=null){var now=Date.now();if(!window._fcPrev){window._fcPrev=d.flow.fc;window._fcT=now;window._fcFps=0}else if(now-window._fcT>=1000){window._fcFps=Math.round((d.flow.fc-window._fcPrev)*1000/(now-window._fcT));window._fcPrev=d.flow.fc;window._fcT=now}var fpse=$('flow-fps');fpse.textContent=window._fcFps+' fps / err '+d.flow.ec;fpse.style.color=window._fcFps>=60?'#7ee787':(window._fcFps>=20?'#d2991d':'#f85149')}if(d.flow.fx!=null)$('flow-raw').textContent=d.flow.fx+' / '+d.flow.fy;if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(1)+' / '+d.flow.vy.toFixed(1);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){$('flow-tgt').textContent=d.flow.tx.toFixed(0)+' / '+d.flow.ty.toFixed(0);var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(0)+' / '+ey.toFixed(0)}else{$('flow-tgt').textContent='-- / --';$('flow-perr').textContent='-- / --'}}}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(2);$('flow-y').textContent=d.flow.y.toFixed(2);$('flow-qual').textContent=d.flow.qual;if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(2)+' / '+d.flow.cy.toFixed(2);if(d.flow.fc!=null){var now=Date.now();if(!window._fcPrev){window._fcPrev=d.flow.fc;window._fcT=now;window._fcFps=0}else if(now-window._fcT>=1000){window._fcFps=Math.round((d.flow.fc-window._fcPrev)*1000/(now-window._fcT));window._fcPrev=d.flow.fc;window._fcT=now}var fpse=$('flow-fps');fpse.textContent=window._fcFps+' fps / err '+d.flow.ec;fpse.style.color=window._fcFps>=60?'#7ee787':(window._fcFps>=20?'#d2991d':'#f85149')}if(d.flow.fx!=null)$('flow-raw').textContent=d.flow.fx+' / '+d.flow.fy;if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(2)+' / '+d.flow.vy.toFixed(2);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){$('flow-tgt').textContent=d.flow.tx.toFixed(2)+' / '+d.flow.ty.toFixed(2);var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(2)+' / '+ey.toFixed(2)}else{$('flow-tgt').textContent='-- / --';$('flow-perr').textContent='-- / --'}}}\n" \
 "if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
 "if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \
@@ -226,7 +227,7 @@
 "let toastTimer=null;function showToast(msg,warn){let t=$('toast');t.textContent=msg;t.className='toast'+(warn?' warn':'')+' show';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},1500)}\n" \
 "function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
-"function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky}));showToast('flow comp '+kx+' / '+ky)}\n" \
+"function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;var s=parseFloat($('gk-s').value)||0.00244;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky,scale:s}));showToast('flow comp '+kx+' / '+ky+' scale '+s)}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
 "/* Joysticks */\n" \

@@ -2,13 +2,32 @@
 #include "i2c_bus.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "tof400f";
 
+/* 缓存过期时间：传感器正常 ~10Hz 出数，超过 500ms 没有新样本说明它死了。
+ * 过期后必须报告失效，不能永远返回旧高度 —— 定高环拿着假高度会一直悬在
+ * 错误的油门上（甚至持续爬升/下坠）。 */
+#define TOF_STALE_US  500000
+
 static i2c_master_dev_handle_t g_dev_handle;
 static uint16_t g_last_valid_mm = 0;
+static int64_t  g_last_fresh_us = 0;
+
+/* 返回缓存值；缓存过期或从未有效则报失效（*out=0），上层据此跳过定高环 */
+static int cached_result(uint16_t *out)
+{
+    if (g_last_valid_mm == 0 ||
+        (esp_timer_get_time() - g_last_fresh_us) > TOF_STALE_US) {
+        *out = 0;
+        return -1;
+    }
+    *out = g_last_valid_mm;
+    return 0;
+}
 
 /* ── VL53L1X register addresses from ST ULD ── */
 #define VL53L1_SYSTEM__MODE_START                        0x0087
@@ -307,31 +326,28 @@ int tof400f_get_distance(uint16_t *distance_mm)
      */
     static uint8_t skip_counter = 0;
     if (++skip_counter < 10) {
-        *distance_mm = g_last_valid_mm;
-        return (g_last_valid_mm > 0) ? 0 : -1;
+        return cached_result(distance_mm);
     }
     skip_counter = 0;
 
     bool ready = false;
     if (vl53l1x_check_data_ready(&ready) != 0 || !ready) {
-        *distance_mm = g_last_valid_mm;
-        return (g_last_valid_mm > 0) ? 0 : -1;
+        return cached_result(distance_mm);
     }
 
     vl53l1x_clear_interrupt();
 
     uint16_t dist;
     if (vl53l1x_get_distance(&dist) != 0) {
-        *distance_mm = g_last_valid_mm;
-        return (g_last_valid_mm > 0) ? 0 : -1;
+        return cached_result(distance_mm);
     }
 
     if (dist >= 40 && dist <= 4000) {
         g_last_valid_mm = dist;
+        g_last_fresh_us = esp_timer_get_time();
         *distance_mm = dist;
         return 0;
     }
 
-    *distance_mm = g_last_valid_mm;
-    return (g_last_valid_mm > 0) ? 0 : -1;
+    return cached_result(distance_mm);
 }

@@ -41,11 +41,12 @@ typedef struct {
     bool  motor_active;  /* true when motor[] should override flight ctrl */
     float mtrim[4];      /* per-motor trim offset -0.1–0.1 */
     int   calib_motor;   /* target motor index for single-ESC calibration */
-    float move_to_x;     /* P4 move_to target X offset (flow unit, forward+) */
-    float move_to_y;     /* P4 move_to target Y offset (flow unit, right+) */
+    float move_to_x;     /* P4 move_to target X offset (meters, forward+) */
+    float move_to_y;     /* P4 move_to target Y offset (meters, right+) */
     float takeoff_height;   /* takeoff target altitude in meters */
     float takeoff_throttle; /* takeoff base throttle 0.0–1.0 */
     float flow_kx, flow_ky; /* optical-flow gyro-compensation gains (runtime-tuned) */
+    float flow_scale;       /* optical-flow metric scale rad/count (runtime-tuned) */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 
