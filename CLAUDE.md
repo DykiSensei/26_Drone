@@ -6,7 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-S3 quadcopter flight controller based on ESP-IDF 5.5.4. WiFi AP + WebSocket for remote control and telemetry. References Crazyflie/esp-drone architecture.
 
-Full architecture, pinout, and design decisions are in `DESIGN.md`.
+Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calibration procedures for humans are in `README.md`.
+
+## Current Status & TODO (last updated 2026-07-02)
+
+**Flight-verified**: STABILIZE, ALT_HOLD (vz damping + takeoff target ramp), auto-takeoff, optical-flow gyro-comp calibration (kx=ky=−2.5), per-motor trim.
+
+**Done but NOT yet flight-tested** (builds clean for esp32s3):
+1. **Metric flow refactor** — all horizontal control now in m/s / meters (details in Architecture below). Motivation: raw flow-unit gains varied 5–10× with altitude → hover instability + lateral drift during takeoff climb. ⚠️ Before trusting position hold, calibrate `flow_scale` (default 0.00244 rad/count): at a fixed height move the drone a known distance (e.g. 1 m), compare telemetry `X (m)`, then `new_scale = 0.00244 × actual / displayed` via the web FlowScale input. Value is lost on reboot (no NVS yet).
+2. **Safety hardening** — calibration/trim commands DISARMED-gated; manual motor test now only works in DISARMED (bench workflow inverted vs before!); telemetry 20Hz async via `httpd_queue_work`; IMU failsafe (200ms → DISARM); TOF staleness (500ms → invalid, ALT_HOLD degrades to stick throttle); WS client-limit rejection.
+3. Loop timing: `vTaskDelayUntil` fixed cadence + measured dt.
+
+**Sensor roadmap** (BN-880 GPS+magnetometer module purchased, plan agreed 2026-07):
+1. ✅ Metric flow + dt fix (this step)
+2. ⏳ **Magnetometer — next step**: BN-880 compass wires onto the existing I2C0 bus (SDA=GPIO9, SCL=GPIO8, 3.3V). Driver must probe both chip variants: HMC5883L@0x1E and QMC5883L@0x0D (BN-880 ships with either). Then extend Mahony to 9-axis (mag yaw correction) and rotate flow deltas into the world frame before integrating — fixes yaw rotation corrupting the position lock. Mount away from motors/power wires; hard/soft-iron calibration required.
+3. ⏳ GPS — only if outdoor navigation is confirmed as a goal (meter-level accuracy, useless indoors / at 0.2–2m position-hold scale). UART1 RX (GPIO44) is taken by optical flow; use another UART.
+
+**Open issues from the 2026-07-02 code audit** (roughly priority-ordered):
+- `setpoint_t` torn reads: main loop dereferences the live `g_sp` pointer many times per iteration — copy the struct once per loop under a small lock; `pending_cmd` is a single slot that can drop a command arriving between execute and clear — replace with a FreeRTOS queue
+- accel-Z bias never calibrated (`mpu6050.c` keeps z offset = 0, MPU6050 z bias can be ±0.1g) → biases `vz` → constant altitude-throttle offset. Fix: `g_accel_offs[2] = avg_z − GRAVITY` during calibration
+- `altitude.c` detects fresh TOF samples via float equality (`current_m != prev_m`) — a perfectly steady reading stalls the vz correction; the TOF driver should export a fresh flag instead
+- No battery voltage ADC (frontend already parses a `battery` telemetry field that firmware never sends); no low-voltage failsafe — most common crash cause for hobby quads
+- No pre-arm checks on takeoff (attitude sane / TOF valid / flow alive)
+- RGB status LED (GPIO48, WS2812) is in the pinout but has no driver
+- NVS parameter persistence (`components/system/` planned): trim, mtrim, flow_kx/ky, flow_scale all lost on reboot
+- Dead code: `commander_set_cmd_callback`/`g_cmd_cb` never called; unreachable rate-mode `else` branch in main.c angle control (outer branch already excludes DISARMED)
+- `pid_t` shadows the POSIX type from `<sys/types.h>` — rename to e.g. `pid_ctrl_t` eventually
+- No unit tests / CI; `web_page.h` is a 260-line C string macro (consider `EMBED_TXTFILES` with a real .html file)
 
 ## Build & Flash
 
@@ -22,16 +48,16 @@ $env:PATH = "C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20260121\xtensa-esp-el
 $env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 
 # Build
-& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone build
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\drone\26_Drone build
 
 # Flash + monitor
-& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone flash monitor
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\drone\26_Drone flash monitor
 
 # Clean build (after messing with config)
-& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone fullclean
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\drone\26_Drone fullclean
 
 # On new machines: set target first
-& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\26_Drone set-target esp32s3
+& C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:\Espressif\frameworks\esp-idf-v5.5.4\tools\idf.py -C C:\Users\15381\OneDrive\Desktop\drone\26_Drone set-target esp32s3
 ```
 
 (A non-fatal `ESP_ROM_ELF_DIR` gdbinit warning appears during builds — safe to ignore; the build still completes.)
@@ -68,7 +94,7 @@ Each component has its own `CMakeLists.txt`. The main component `REQUIRES driver
 
 ## Architecture
 
-**100Hz main loop** (Core 1): sensor read → Mahony AHRS → Commander setpoint → PID control → Mixer → Motor PWM → telemetry broadcast
+**100Hz main loop** (Core 1): sensor read → Mahony AHRS → Commander setpoint → PID control → Mixer → Motor PWM → telemetry broadcast (20Hz, async — never blocks the loop)
 
 **Control chain** (STABILIZE mode):
 ```
@@ -83,7 +109,8 @@ Web buttons → vel_x/vel_y  ──→ flow_hold velocity PID ──→ ±8° co
 P4 move_to → position PID ──→ velocity setpoint ────────→
 ```
 **Flow sign convention** (bench-verified on this airframe — depends on module mounting, recheck if remounted): pushing the drone forward gives `fx > 0`, right gives `fy > 0` — forward/right = positive flow. The API's `vel>0=forward/right` maps *directly* (no negation) to the flow_hold setpoint. The angle-direction inversion lives in one place: `flow_hold_predict()` negates its PID outputs (positive pitch angle = nose-up = backward acceleration, so intercepting forward drift needs +pitch from a negative PID error). In the IMU predict path `accel_x` is negated (IMU X points backward; a down-facing camera frame can never align with both axes of the upward-Z IMU frame) while `accel_y` feeds directly.
-Position controller uses optical flow integral as position feedback (dead-reckoning in flow units). It has two roles: **`move_to`** (one-shot move) and **position hold** (lock the current point to resist drift). In ALT_HOLD/POS_HOLD, position hold is the *default* — once airborne with good flow quality, the current x/y is captured and locked. A `move_to` runs to its target then **transitions into hold at that point** (no longer falls back to velocity=0). Web direction buttons temporarily override with manual velocity, then re-lock the new position on release. STABILIZE does not lock position (full manual).
+**Everything horizontal is metric now**: `flow_hold_update()` converts raw flow counts to m/s (`v = counts × flow_scale × TOF_height / dt_frame`, `flow_scale` default 0.00244 rad/count for the PMW3901 optics family, runtime-tunable via `{"cmd":"flow_comp","scale":..}`). This removed the old raw-flow-unit plumbing whose effective loop gain varied 5–10× with altitude — the root cause of height-dependent hover instability and lateral drift during the takeoff climb. Velocity setpoints are m/s (web buttons = ±0.5 × `MANUAL_VEL_MS`), `move_to` offsets are meters.
+Position controller uses `flow_hold`'s dead-reckoned metric position (`pos_x_m`/`pos_y_m`, integrated from the fused velocity estimate) as feedback — not the driver's raw flow integral (which remains telemetry-only). It has two roles: **`move_to`** (one-shot move) and **position hold** (lock the current point to resist drift). In ALT_HOLD/POS_HOLD, position hold is the *default* — once airborne with good flow quality, the current x/y is captured and locked. A `move_to` runs to its target then **transitions into hold at that point** (no longer falls back to velocity=0). Web direction buttons temporarily override with manual velocity, then re-lock the new position on release. STABILIZE does not lock position (full manual).
 
 **Task layout** (dual-core FreeRTOS):
 - Core 0: WiFi protocol stack (ESP-IDF managed)
@@ -91,20 +118,24 @@ Position controller uses optical flow integral as position feedback (dead-reckon
 
 ## Key Design Decisions
 
-- **`FLOW_ENABLED` compile flag** (`main/main.c:25`): a `#define FLOW_ENABLED 1` gates *all* optical-flow code — PV3901L1 init, the `flow_hold`/`position` updates, the `move_to`/`move_stop`/`vel_x`/`vel_y` paths, and POS_HOLD's integral reset. Set to `0` to build without the flow module (e.g. when the hardware is broken); STABILIZE and ALT_HOLD still work, but POS_HOLD and all horizontal movement become no-ops.
+- **`FLOW_ENABLED` compile flag** (top of `main/main.c`): a `#define FLOW_ENABLED 1` gates *all* optical-flow code — PV3901L1 init, the `flow_hold`/`position` updates, and the `move_to`/`move_stop`/`vel_x`/`vel_y` paths. Set to `0` to build without the flow module (e.g. when the hardware is broken); STABILIZE and ALT_HOLD still work, but POS_HOLD and all horizontal movement become no-ops.
 - **Shared I2C0 bus**: `i2c_bus.c` initializes I2C0 once (`g_i2c0_bus` handle). Both MPU6050 (0x68) and TOF400F (0x29) attach via `i2c_master_bus_add_device()` — never re-init the bus.
 - **Motor safety**: `MOTOR_MIN = 0.05` floor-clip (not shift-up). Throttle < 5% stops motors + resets all PIDs + resets altitude/flow/position controllers to prevent ground spooling.
 - **Altitude loop**: height PID (P+I, no PID-D) plus a **vertical-speed (`vz`) damping term** that is the real fix for up/down oscillation. `vz` is computed only on *fresh* TOF samples (TOF is stair-step ~10Hz; differentiating cached frames would spike) and EMA-smoothed. **Takeoff ramps the target altitude** from the current ground height (slew-rate limited, `ALT_RAMP_RATE`) instead of stepping straight to the goal — a stepped target caused overshoot then a throttle cut to zero (crash). `vz` is exposed in telemetry as `alt.vz`.
 - **TOF skip-counter**: VL53L1X data-ready checked every 10th call (@100Hz ≈ every 100ms) to match sensor timing budget; cached values returned otherwise.
-- **Deferred command execution**: Blocking operations (ESC calibration, gyro recalibration) are queued via `pending_cmd` and executed in the main loop context — never from the HTTP server task. This prevents WiFi/WebSocket freeze during calibration.
-- **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE; POS_HOLD adds optical-flow velocity hold on top. **Both ALT_HOLD and POS_HOLD now run the position-hold loop** (lock current x/y to resist drift, flow-quality gated). Entering an altitude mode auto-captures the target height. The flow integral is **no longer reset** on POS_HOLD entry — position hold uses the absolute integral as a relative lock reference, so resetting it would dislocate the lock point and cause a fly-away; this keeps the lock continuous across ALT_HOLD↔POS_HOLD switches.
-- **IMU+flow complementary velocity filter**: `flow_hold` is split into `flow_hold_predict()` (every 100Hz tick — EMA-filtered IMU accel, `ACCEL_EMA_ALPHA=0.3` ≈5.7Hz, integrates the velocity estimate and the velocity PID runs on it) and `flow_hold_update()` (fresh flow frames only ~50Hz — gyro-compensated flow corrects the estimate). This catches small drifts the PV3901L1 reports as zero displacement.
-- **Takeoff delayed position lock**: during the takeoff climb, position hold is suppressed (`g_position_lock_pending`) because body tilt corrupts the flow integral; the lock engages only once height error < 10cm vs `target_final_m`, |vz| < 0.15 m/s, and flow qual > 30. Telemetry `flow.ps` encodes the state: 0=idle, 1=pending, 2=hold, 3=move_to.
-- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}`, `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`, `{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5}` (runtime optical-flow gyro-compensation tuning). Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
+- **Deferred command execution**: Blocking operations (ESC calibration, gyro recalibration) are queued via `pending_cmd` and executed in the main loop context — never from the HTTP server task. This prevents WiFi/WebSocket freeze during calibration. **Calibration/trim commands (`calibrate`, `gyro_calib`, `calibrate_motor`, `level_trim`, `reset_trim`) are rejected unless mode == DISARMED** — ESC calibration drives all motors to MAX for 6s and blocks the loop ~11s; triggering it in flight would be catastrophic.
+- **Control modes**: DISARMED (default) / STABILIZE / ALT_HOLD / POS_HOLD. ALT_HOLD adds TOF height PID on top of STABILIZE; POS_HOLD adds optical-flow velocity hold on top. **Both ALT_HOLD and POS_HOLD now run the position-hold loop** (lock current x/y to resist drift, flow-quality gated). Entering an altitude mode auto-captures the target height. Position-hold feedback is `flow_hold.pos_x_m/pos_y_m` (never reset while armed) used as a relative lock reference — resetting it mid-flight would dislocate the lock point and cause a fly-away; this keeps the lock continuous across ALT_HOLD↔POS_HOLD switches. It resets only on DISARM / throttle-cut.
+- **IMU+flow complementary velocity filter (metric)**: `flow_hold` is split into `flow_hold_predict()` (every 100Hz tick — EMA-filtered IMU accel, `ACCEL_EMA_ALPHA=0.3` ≈5.7Hz, integrates the velocity estimate in m/s, integrates that into `pos_x_m`, and the velocity PID runs on it) and `flow_hold_update()` (fresh flow frames only — gyro compensation in the counts domain, then metric conversion using TOF height and the measured frame interval, then complementary-filter correction of the estimate). Both channels are m/s, so no arbitrary `imu_scale` factor exists anymore. This catches small drifts the PV3901L1 reports as zero displacement.
+- **Takeoff delayed position lock**: during the takeoff climb, position hold is suppressed (`g_position_lock_pending`) because body tilt corrupts the position dead-reckoning; the velocity loop (setpoint 0, now metric so its gain no longer detunes at low altitude) keeps resisting lateral drift throughout the climb, and the position lock engages once height error < 10cm vs `target_final_m`, |vz| < 0.15 m/s, and flow qual > 30. Telemetry `flow.ps` encodes the state: 0=idle, 1=pending, 2=hold, 3=move_to.
+- **WebSocket command flow**: browser sends JSON → `http_server` → `commander_parse` → updates global `setpoint_t`. Special commands: `{"cmd": "calibrate"}`, `{"cmd": "gyro_calib"}`, `{"cmd": "level_trim"}`, `{"cmd": "reset_trim"}`, `{"cmd": "calibrate_motor", "motor_index": 0}`, `{"cmd": "move_to", "x": 0.5, "y": -0.3}` (offsets in meters, clamped ±3), `{"cmd": "move_stop"}`, `{"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}`, `{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5, "scale": 0.00244}` (runtime optical-flow tuning: gyro-comp gains + metric scale rad/count). Velocity commands (`vel_x`/`vel_y`) are sent via regular 50Hz stick data, not special commands.
 - **Safety mechanisms**:
   - 500ms command timeout: if no WebSocket message received for >500ms → auto-DISARMED
   - All-clients-disconnected → `commander_reset_setpoint()` forces DISARMED + throttle=0
-  - `motor_active` path now respects DISARMED + throttle < 5% safety
+  - Manual motor test (`motor_active`) works **only in DISARMED** (bench test); in flight modes the motor array is ignored entirely — the old inverted logic made the web "All MAX" button a full-throttle command in flight
+  - IMU failsafe: 20 consecutive `mpu6050_read` failures (~200ms) → forced DISARMED (attitude feedback untrustworthy = open-loop); on transient failures the last-good IMU sample is held instead of feeding zeros to the rate PIDs
+  - TOF staleness: no fresh sample for >500ms → driver reports invalid (`tof_mm=0`) instead of serving the stale cache forever; altitude PID is skipped so ALT_HOLD degrades to flying on base stick throttle
+  - Telemetry is sent from the httpd task via `httpd_queue_work` (dropped, never queued, if the previous frame is still in flight) at 20Hz — a congested WiFi link can no longer block the 100Hz control loop
+  - WS handshake rejected when 4 clients already connected (an untracked 5th client could send commands without counting toward disconnect safety)
   - Frontend resets all control variables on WebSocket reconnect, sends explicit DISARMED
   - `commander_parse` parses to local temp then struct-assigns to `g_sp` (narrowed race window)
 
@@ -139,8 +170,8 @@ All component headers are public (no `private_*.h`). Include patterns:
 - `mixer.h` — `mixer_apply()`
 - `commander.h` — `commander_parse()`, `commander_get_setpoint()`, `commander_reset_setpoint()`, `commander_is_command_timeout()`, `commander_clear_pending_cmd()`, `commander_mode_name()`, `setpoint_t` (includes `vel_x`, `vel_y`, `move_to_x`, `move_to_y`, `takeoff_height`, `takeoff_throttle`), `flight_mode_t`, `CMD_*` enums
 - `altitude.h` — `altitude_init()`, `altitude_update()`, `altitude_capture_target()` (hold in place), `altitude_set_target()` (ramp from current height to a final target — used by takeoff), `altitude_reset()`, `altitude_ctrl_t`
-- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()`, `flow_hold_set_gyro_comp()` (gyro-comp gains, default −2.5/−2.5), `flow_hold_set_imu_scale()`, `flow_hold_predict()` (every 100Hz tick: IMU accel integrates `vx_est`/`vy_est` + runs the velocity PID), `flow_hold_update()` (fresh flow frames only ~50Hz: gyro compensation then complementary-filter correction of the estimate — no PID here), `flow_hold_reset()`, `flow_hold_is_active()`, `flow_hold_t`
-- `position.h` — `position_init()`, `position_set_target()` (move_to, one-shot), `position_hold_start()` (lock current point, persistent — does not exit on reach), `position_update()`, `position_reset()`, `position_reached()`, `position_ctrl_t` (has `hold` flag distinguishing the two)
+- `flow_hold.h` — `flow_hold_init()`, `flow_hold_set_velocity()` (m/s), `flow_hold_set_gyro_comp()` (gyro-comp gains, default −2.5/−2.5), `flow_hold_set_flow_scale()` (metric scale rad/count, default 0.00244), `flow_hold_predict()` (every 100Hz tick: IMU accel integrates `vx_est`/`vy_est` [m/s] and `pos_x_m`/`pos_y_m` [m] + runs the velocity PID), `flow_hold_update()` (fresh flow frames only: gyro compensation → metric conversion via TOF height → complementary-filter correction of the estimate — no PID here), `flow_hold_reset()` (keeps calibration values `gyro_kx/ky`, `flow_scale`), `flow_hold_is_active()`, `flow_hold_t`
+- `position.h` — `position_init()`, `position_set_target()` (move_to, one-shot, offsets in meters), `position_hold_start()` (lock current point, persistent — does not exit on reach), `position_update()` (also debounces move_to arrival: 10 consecutive in-tolerance ticks), `position_reset()`, `position_reached()`, `position_ctrl_t` (has `hold` flag distinguishing the two)
 
 **Communication:**
 - `wifi_ap.h` — `wifi_ap_init()`
@@ -153,7 +184,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - **Return values**: 0 = success, -1 = failure (ESP-IDF convention)
 - **Globals**: `g_` prefix for file-static/module-level variables (e.g. `g_i2c0_bus`, `g_trim_roll`)
 - **Logging**: `static const char *TAG = "module"` then `ESP_LOGI`/`ESP_LOGW`/`ESP_LOGE`(TAG, ...)
-- **Timing**: `vTaskDelay(pdMS_TO_TICKS(10))` for 100Hz loop; `esp_timer_get_time()` for variable-rate updates (flow_hold) and command timeout
+- **Timing**: `vTaskDelayUntil()` fixed 10ms cadence for the 100Hz loop, with `dt` measured each iteration via `esp_timer_get_time()` (clamped 5–30ms) and fed to all integrators — never hard-code dt; `esp_timer_get_time()` also for variable-rate updates (flow frame interval) and command timeout
 - **JSON**: telemetry uses raw `snprintf` (not cJSON) — buffer is 768 bytes; commands use cJSON for parsing
 
 ## Init Ordering
@@ -176,3 +207,4 @@ WiFi starts after motors so calibration doesn't conflict with the WiFi stack. HT
 - **500ms timeout**: `g_last_command_us` timestamp updated on each valid WebSocket parse; main loop checks `commander_is_command_timeout()` → auto-DISARMED
 - **Disconnect safety**: when all WS clients disconnect, `ws_disconnect_cb` fires `commander_reset_setpoint()` — cleans both `g_sp` and the timestamp
 - `pv3901l1_data_t` is filled by the `flow_rx` FreeRTOS task (Core 1, priority 10, 100ms UART poll), consumed by main loop
+- **WS broadcast**: main loop copies JSON into `g_bcast_buf` and queues `bcast_work` via `httpd_queue_work`; all `g_ws_fds` mutation (connect, close, send-failure removal) happens in the httpd task — no cross-task race on the fd list. `g_bcast_inflight` makes the main loop drop frames instead of ever waiting
