@@ -22,6 +22,8 @@ typedef struct {
                                        * 补偿量 = k × ω_hp × 高度，tilt 测试定符号） */
     float   gyro_x_lp, gyro_y_lp;     /* 陀螺慢变零偏估计（EMA）：补偿只用高通分量
                                        * ω_hp = ω − ω_lp，防止直流零偏注入假速度 */
+    float   ax_lp, ay_lp;             /* 加速度直流估计（EMA）：积分只用高通分量，
+                                       * 挡住倾斜重力泄漏 g·sinθ（悬停常倾角/手持） */
     float   flow_scale;               /* 米制换算系数 rad/count（PMW3901 系 ≈0.00244，可运行时标定）*/
     float   flow_x_f, flow_y_f;       /* 光流速度 EMA 滤波状态 (m/s) */
     float   flow_x_comp, flow_y_comp; /* 补偿+平滑后的光流速度 (m/s)（遥测/标定用） */

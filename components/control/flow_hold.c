@@ -51,6 +51,13 @@
  * 悬停中真实角速度是零均值瞬态，高通（截止 ~0.16Hz）不损伤补偿效果。 */
 #define GYRO_LP_ALPHA        0.01f   /* 零偏跟踪 EMA，τ≈1-2s @ 50-100fps */
 
+/* 加速度通道同样只用高通分量：机身倾斜 θ 会把重力泄漏 g·sinθ 当成水平
+ * 加速度（手持 3° = 0.5 m/s²，2026-07-04 对照实验确认：地面校准后 accel≈0
+ * 位置稳定，手持 1m 时 accel≈0.5 → vel 恒偏 → 位置漂移；悬停配平的 1-2°
+ * 常倾角同理）。互补滤波里 IMU 只负责高频瞬态，直流速度由光流绝对测量
+ * 提供，高通零偏跟踪把重力泄漏/偏置/校准残差等直流污染全部挡掉。 */
+#define ACCEL_LP_ALPHA       0.007f  /* 直流跟踪 EMA，τ≈1.5s @ 100Hz */
+
 void flow_hold_init(flow_hold_t *fh)
 {
     pid_init(&fh->pid_vx, FLOW_KP, FLOW_KI, FLOW_KD,
@@ -68,6 +75,8 @@ void flow_hold_init(flow_hold_t *fh)
     fh->gyro_ky = 0.0f;
     fh->gyro_x_lp = 0.0f;
     fh->gyro_y_lp = 0.0f;
+    fh->ax_lp = 0.0f;
+    fh->ay_lp = 0.0f;
     fh->flow_scale = FLOW_SCALE_DEFAULT;
     fh->flow_x_f = 0.0f;
     fh->flow_y_f = 0.0f;
@@ -96,6 +105,10 @@ void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt
         fh->quality_gain *= 0.95f;
     }
 
+    /* 加速度直流跟踪（始终跟踪，与光流有效性无关） */
+    fh->ax_lp += ACCEL_LP_ALPHA * (ax_world - fh->ax_lp);
+    fh->ay_lp += ACCEL_LP_ALPHA * (ay_world - fh->ay_lp);
+
     if (fh->quality_gain < FLOW_MIN_TRUST) {
         /* 光流不可用（贴地失焦/无纹理/模块失效）：纯 IMU 积分不可信，
          * 冻结位置 + 快衰减速度估计（见文件头 FLOW_MIN_TRUST 注释）。
@@ -104,10 +117,10 @@ void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt
         fh->vx_est *= VX_FAST_DECAY;
         fh->vy_est *= VX_FAST_DECAY;
     } else {
-        /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆）。米制
-         * 统一后 m/s² × s 直接得 m/s，与光流通道量纲一致。 */
-        fh->vx_est = (fh->vx_est + ax_world * dt) * IMU_LEAK;
-        fh->vy_est = (fh->vy_est + ay_world * dt) * IMU_LEAK;
+        /* IMU 加速度积分（仅高通分量，见 ACCEL_LP_ALPHA 注释）+ 慢衰减。
+         * 米制统一后 m/s² × s 直接得 m/s，与光流通道量纲一致。 */
+        fh->vx_est = (fh->vx_est + (ax_world - fh->ax_lp) * dt) * IMU_LEAK;
+        fh->vy_est = (fh->vy_est + (ay_world - fh->ay_lp) * dt) * IMU_LEAK;
 
         /* 航位推算位置（m）：积分融合速度。position 环用它做锁定反馈 */
         fh->pos_x_m += fh->vx_est * dt;
@@ -224,8 +237,9 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
 
 void flow_hold_reset(flow_hold_t *fh)
 {
-    /* 注意：不复位 gyro_kx/ky、flow_scale（标定值）和 gyro_x/y_lp（零偏
-     * 估计，解锁瞬间零偏不会变，保留可让起飞阶段的补偿立即有效） */
+    /* 注意：不复位 gyro_kx/ky、flow_scale（标定值），也不复位 gyro_x/y_lp
+     * 和 ax/ay_lp（直流估计，解锁瞬间不会突变，保留可让起飞阶段的补偿和
+     * 重力泄漏抑制立即有效） */
     pid_reset(&fh->pid_vx);
     pid_reset(&fh->pid_vy);
     fh->setpoint_vx   = 0.0f;
