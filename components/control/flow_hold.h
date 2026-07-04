@@ -53,11 +53,12 @@ void flow_hold_set_flow_scale(flow_hold_t *fh, float scale);
 void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt);
 
 /**
- * @brief 有新光流帧时调用（~50-100Hz）：陀螺补偿（counts 域）→ 按 TOF 高度换算
- *        米制速度 v = counts × flow_scale × height / dt_frame → 互补滤波校正 vx_est。
- *        米制化后环路增益不再随悬停高度漂移（这是定点不稳/起飞漂移的主根因）。
+ * @brief 有新光流数据时调用：flow_x/flow_y 传驱动的**累计** counts（acc_x/acc_y，
+ *        自上次消费以来的总位移——不要传最新帧值，批量到达会丢帧）。
+ *        换算 v = 累计counts × flow_scale × height / 消费窗口时长（实测），
+ *        再做米制域陀螺补偿与互补滤波校正 vx_est。
  */
-void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
+void flow_hold_update(flow_hold_t *fh, float flow_x, float flow_y,
                       float gyro_x, float gyro_y, uint8_t qual, float height_m);
 
 void flow_hold_reset(flow_hold_t *fh);

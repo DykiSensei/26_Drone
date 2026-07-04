@@ -41,8 +41,9 @@
  * PMW3901 系光学参数（4.2° FOV / 30 px）≈ 0.00244 rad/count，
  * PV3901L1 疑似同系，实际系数经 {"cmd":"flow_comp","scale":..} 试飞标定。 */
 #define FLOW_SCALE_DEFAULT   0.00244f
-#define FRAME_DT_MIN         0.005f  /* 帧间隔钳位 (s) */
-#define FRAME_DT_MAX         0.05f
+#define FRAME_DT_MIN         0.005f  /* 消费窗口钳位 (s)。counts 为窗口内累计值，
+                                      * 上限放宽到 0.2：窗口拉长时除法仍精确 */
+#define FRAME_DT_MAX         0.2f
 #define FRAME_DT_DEFAULT     0.01f
 
 /* 补偿用陀螺高通：扣除慢变零偏（温漂/搬动后偏移）。直流零偏经补偿项
@@ -169,7 +170,7 @@ void flow_hold_set_gyro_comp(flow_hold_t *fh, float kx, float ky)
     fh->gyro_ky = ky;
 }
 
-void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
+void flow_hold_update(flow_hold_t *fh, float flow_x, float flow_y,
                       float gyro_x, float gyro_y, uint8_t qual, float height_m)
 {
     bool height_ok = (height_m > 0.04f) && (height_m < FLOW_MAX_HEIGHT_M);
@@ -202,10 +203,13 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
     fh->last_update_us = now;
 
     if (valid) {
-        /* 米制换算：v = counts × (rad/count) × 高度 / 帧间隔 */
+        /* 米制换算：v = 窗口累计 counts × (rad/count) × 高度 / 窗口时长。
+         * counts 必须是驱动的累计值（acc_x/acc_y）而非最新帧值 —— UART
+         * 批量到达时最新帧语义丢掉批内其余帧，速度缩水且随机（2026-07-04
+         * 台架排查数小时的教训）。 */
         float k_m = fh->flow_scale * height_m / dt_frame;
-        float vx_m = (float)flow_x * k_m;
-        float vy_m = (float)flow_y * k_m;
+        float vx_m = flow_x * k_m;
+        float vy_m = flow_y * k_m;
 
         /* 陀螺补偿（米制域，高通后）：旋转引起的视速度 = ω × 高度，小角度
          * 下精确恒等、与帧率/帧间隔无关。pitch rate(gyro_y) 污染前向通道，

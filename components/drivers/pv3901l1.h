@@ -19,8 +19,13 @@ typedef enum {
 } flow_yaw_mode_t;
 
 typedef struct {
-    int16_t flow_x;          /* 当前帧X方向原始位移 */
-    int16_t flow_y;          /* 当前帧Y方向原始位移 */
+    int16_t flow_x;          /* 当前帧X方向原始位移（遥测/调试） */
+    int16_t flow_y;          /* 当前帧Y方向原始位移（遥测/调试） */
+    int32_t acc_x;           /* 自上次 get_data 起累计位移 counts —— 控制用。
+                              * UART 批量到达与主循环消费不同步时，"最新帧"
+                              * 语义会丢掉批内其余帧（曾丢 ~95% → 速度缩水
+                              * 十几倍且随机），累计语义无论怎么攒批都精确 */
+    int32_t acc_y;
     float   flow_x_i;        /* X方向积分位移 */
     float   flow_y_i;        /* Y方向积分位移 */
     uint8_t qual;            /* 数据质量 (0–255) */

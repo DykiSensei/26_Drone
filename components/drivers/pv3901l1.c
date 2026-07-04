@@ -59,6 +59,8 @@ static void parse_byte(uint8_t byte)
                 g_flow.flow_x = raw_y;              /* 机体前正 = 模块 +y */
                 g_flow.flow_y = (int16_t)(-raw_x);  /* 机体右正 = 模块 −x */
                 g_flow.qual   = rx_buf[7];
+                g_flow.acc_x += g_flow.flow_x;      /* 累计给控制消费，不丢帧 */
+                g_flow.acc_y += g_flow.flow_y;
                 g_flow.flow_x_i += (float)g_flow.flow_x;
                 g_flow.flow_y_i += (float)g_flow.flow_y;
                 g_flow.frame_count++;
@@ -86,8 +88,12 @@ static void uart_rx_task(void *arg)
     uint8_t buf[PV3901L1_UART_BUF_SIZE];
     uint32_t raw_total = 0;
     while (1) {
+        /* 超时必须短：uart_read_bytes 会等到凑满 len 或超时才返回。
+         * 19200 波特率下 256 字节要 133ms，原 100ms 超时导致光流帧被攒成
+         * ~100ms 一批（21 帧）集中解析 —— 配合旧的"最新帧覆盖"消费语义，
+         * 批内 95% 的位移被丢弃且延迟高达 100ms。10ms 超时 ≈ 每批 ≤2 帧。 */
         int len = uart_read_bytes(PV3901L1_UART_PORT, buf,
-                                  sizeof(buf), pdMS_TO_TICKS(100));
+                                  sizeof(buf), pdMS_TO_TICKS(10));
         if (len > 0) {
             raw_total += len;
             for (int i = 0; i < len; i++) {
@@ -165,6 +171,8 @@ int pv3901l1_get_data(pv3901l1_data_t *out)
     if (ready) {
         memcpy(out, &g_flow, sizeof(pv3901l1_data_t));
         g_flow.data_ready = false;
+        g_flow.acc_x = 0;   /* 累计量为"取走"语义：消费后清零重新累计 */
+        g_flow.acc_y = 0;
     }
     portEXIT_CRITICAL(&g_lock);
     return ready ? 0 : -1;

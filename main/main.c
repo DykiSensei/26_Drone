@@ -376,7 +376,8 @@ void app_main(void)
         flow_hold_predict(&g_flow_hold, -g_ax_filt, g_ay_filt, dt);
 
         if (flow_new == 0) {
-            flow_hold_update(&g_flow_hold, flow.flow_x, flow.flow_y,
+            /* 传累计 counts（acc），不是最新帧（flow_x）——批量到达不丢帧 */
+            flow_hold_update(&g_flow_hold, (float)flow.acc_x, (float)flow.acc_y,
                              imu.gyro_x, imu.gyro_y, flow.qual, tof_mm * 0.001f);
         }
 #else
