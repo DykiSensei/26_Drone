@@ -170,7 +170,7 @@ void commander_parse(const char *json, int len)
             if (cJSON_IsNumber(kx)) sp.flow_kx = (float)kx->valuedouble;
             if (cJSON_IsNumber(ky)) sp.flow_ky = (float)ky->valuedouble;
             if (cJSON_IsNumber(sc))
-                sp.flow_scale = clamp((float)sc->valuedouble, 0.0005f, 0.02f);
+                sp.flow_scale = clamp((float)sc->valuedouble, 0.0002f, 0.05f);
         }
         else if (strcmp(item->valuestring, "flow_calib") == 0) {
             /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），
