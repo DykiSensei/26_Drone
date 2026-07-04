@@ -100,7 +100,7 @@
 "<div class=\"data-row\"><span>Pos Err X/Y (m)</span><span id=\"flow-perr\">-- / --</span></div>\n" \
 "<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
 "<div class=\"data-row\"><span>Comp x/y (m/s)</span><span id=\"flow-comp\">0.00 / 0.00</span></div>\n" \
-"<div class=\"data-row\"><span>GyroComp Kx/Ky (±1)</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-1.0\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-1.0\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
+"<div class=\"data-row\"><span>GyroComp Kx/Ky (±1)</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"1.0\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"1.0\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
 "<div class=\"data-row\"><span>FlowScale (rad/cnt)</span><span><input id=\"gk-s\" type=\"number\" step=\"0.0002\" value=\"0.00244\" style=\"width:70px\"></span></div>\n" \
 "<div class=\"data-row\"><span>标定模式 (锁定手持标定)</span><span><button id=\"fc-btn\" onclick=\"toggleFlowCalib()\">OFF</button></span></div>\n" \
 "</div>\n" \

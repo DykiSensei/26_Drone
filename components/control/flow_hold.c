@@ -29,6 +29,14 @@
 #define IMU_LEAK         0.999f  /* 每帧慢衰减，防 accel 偏置积爆（τ≈10s @100Hz） */
 #define FLOW_CORRECT_K   0.30f   /* flow 修正强度：新 flow 帧把 vx_est 拉向测量值的比例 */
 
+/* 光流不可信时的保护：慢泄漏的稳态速度 = accel偏置 × dt/(1−λ) ≈ 偏置×10 ——
+ * 没有光流校正拉回时，0.1 m/s² 的残余偏置就会稳态输出 1 m/s 假速度，位置
+ * 一分钟疯跑几十米（贴地/无纹理/模块失效场景实测复现）。处理：信任度低于
+ * 门限 → 不积分加速度、快衰减速度估计（τ≈0.5s）、冻结位置。 */
+#define FLOW_MIN_TRUST        0.05f  /* quality_gain 低于此值视为光流不可用 */
+#define FLOW_FRAME_TIMEOUT_S  0.3f   /* 超过该时长无新光流帧 → 强制衰减信任度 */
+#define VX_FAST_DECAY         0.98f  /* 不可用时速度估计快衰减系数（每 tick） */
+
 /* 米制换算：v(m/s) = counts × FLOW_SCALE(rad/count) × height(m) / dt_frame(s)。
  * PMW3901 系光学参数（4.2° FOV / 30 px）≈ 0.00244 rad/count，
  * PV3901L1 疑似同系，实际系数经 {"cmd":"flow_comp","scale":..} 试飞标定。 */
@@ -36,6 +44,12 @@
 #define FRAME_DT_MIN         0.005f  /* 帧间隔钳位 (s) */
 #define FRAME_DT_MAX         0.05f
 #define FRAME_DT_DEFAULT     0.01f
+
+/* 补偿用陀螺高通：扣除慢变零偏（温漂/搬动后偏移）。直流零偏经补偿项
+ * k·bias·h 注入恒定假速度 —— 1m 高度 1°/s 零偏 = 0.017 m/s，越过死区后
+ * 位置每分钟线性疯跑数米（2026-07-04 悬持 1m 实测复现，qual 正常也中招）。
+ * 悬停中真实角速度是零均值瞬态，高通（截止 ~0.16Hz）不损伤补偿效果。 */
+#define GYRO_LP_ALPHA        0.01f   /* 零偏跟踪 EMA，τ≈1-2s @ 50-100fps */
 
 void flow_hold_init(flow_hold_t *fh)
 {
@@ -52,6 +66,8 @@ void flow_hold_init(flow_hold_t *fh)
     fh->active = false;
     fh->gyro_kx = 0.0f;
     fh->gyro_ky = 0.0f;
+    fh->gyro_x_lp = 0.0f;
+    fh->gyro_y_lp = 0.0f;
     fh->flow_scale = FLOW_SCALE_DEFAULT;
     fh->flow_x_f = 0.0f;
     fh->flow_y_f = 0.0f;
@@ -61,6 +77,7 @@ void flow_hold_init(flow_hold_t *fh)
     fh->vy_est = 0.0f;
     fh->pos_x_m = 0.0f;
     fh->pos_y_m = 0.0f;
+    fh->since_flow_s = 0.0f;
     fh->flow_x_corr = 0.0f;
     fh->flow_y_corr = 0.0f;
 }
@@ -72,16 +89,30 @@ void flow_hold_set_flow_scale(flow_hold_t *fh, float scale)
 
 void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt)
 {
-    /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆）。米制统一后
-     * m/s² × s 直接得 m/s，与光流通道量纲一致。 */
-    fh->vx_est = (fh->vx_est + ax_world * dt) * IMU_LEAK;
-    fh->vy_est = (fh->vy_est + ay_world * dt) * IMU_LEAK;
+    /* 光流帧超时监测：模块死掉/长期无效时 quality_gain 不能停留在旧值，
+     * 否则下面的信任判断永远放行 */
+    fh->since_flow_s += dt;
+    if (fh->since_flow_s > FLOW_FRAME_TIMEOUT_S) {
+        fh->quality_gain *= 0.95f;
+    }
 
-    /* 航位推算位置（m）：积分融合速度。position 环用它做锁定反馈——
-     * 比旧的裸 flow 积分好在：米制（不随高度变尺度）、含 IMU 高频信息、
-     * 低质量时 vx_est 自然衰减 → 位置冻结而不是积累噪声。 */
-    fh->pos_x_m += fh->vx_est * dt;
-    fh->pos_y_m += fh->vy_est * dt;
+    if (fh->quality_gain < FLOW_MIN_TRUST) {
+        /* 光流不可用（贴地失焦/无纹理/模块失效）：纯 IMU 积分不可信，
+         * 冻结位置 + 快衰减速度估计（见文件头 FLOW_MIN_TRUST 注释）。
+         * 代价：失效窗口内的真实漂移不被记录，恢复后位置环感知不到这段
+         * 位移 —— 但远好于把 10× 偏置放大的假速度积进位置里。 */
+        fh->vx_est *= VX_FAST_DECAY;
+        fh->vy_est *= VX_FAST_DECAY;
+    } else {
+        /* IMU 加速度积分 + 慢衰减（防 accel 偏置 / 长期漂移积爆）。米制
+         * 统一后 m/s² × s 直接得 m/s，与光流通道量纲一致。 */
+        fh->vx_est = (fh->vx_est + ax_world * dt) * IMU_LEAK;
+        fh->vy_est = (fh->vy_est + ay_world * dt) * IMU_LEAK;
+
+        /* 航位推算位置（m）：积分融合速度。position 环用它做锁定反馈 */
+        fh->pos_x_m += fh->vx_est * dt;
+        fh->pos_y_m += fh->vy_est * dt;
+    }
 
     /* PID 100Hz 更新（比 flow 帧率高的带宽，能跟住 IMU 高频信息）。
      * 低 quality 时冻结积分，避免噪声 windup。
@@ -131,6 +162,11 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
                  / (float)(FLOW_QUALITY_HIGH - FLOW_QUALITY_LOW);
     }
     fh->quality_gain += FLOW_QUALITY_SMOOTH * (q_target - fh->quality_gain);
+    fh->since_flow_s = 0.0f;   /* 收到新帧，复位超时计时 */
+
+    /* 陀螺零偏跟踪（无论 flow 是否有效都跟踪，零偏估计与光流无关） */
+    fh->gyro_x_lp += GYRO_LP_ALPHA * (gyro_x - fh->gyro_x_lp);
+    fh->gyro_y_lp += GYRO_LP_ALPHA * (gyro_y - fh->gyro_y_lp);
 
     /* 帧间隔实测（米制换算的分母）：模块帧率会随环境变化，不能假定常数 */
     int64_t now = esp_timer_get_time();
@@ -147,15 +183,18 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
         float vx_m = (float)flow_x * k_m;
         float vy_m = (float)flow_y * k_m;
 
-        /* 陀螺补偿（米制域）：旋转引起的视速度 = ω × 高度，小角度下精确恒等、
-         * 与帧率/帧间隔无关。pitch rate(gyro_y) 污染前向通道，roll rate
-         * (gyro_x) 污染右向通道。kx/ky 是无量纲方向/微调系数，标称 ±1.0，
-         * 符号由 IMU 轴向与光流轴向的相对关系决定（tilt 测试二选一）。
-         * 千万不要改回 counts 域常数 k 补偿：旋转 counts = ω·dt_frame/scale，
-         * dt_frame 逐帧实测有抖动 → 常数 k 无法恒零（曾导致 tilt 测试怎么
-         * 调都大幅摆动），米制域的 ω·h 没有这个自由度。 */
-        vx_m -= fh->gyro_kx * gyro_y * height_m;
-        vy_m -= fh->gyro_ky * gyro_x * height_m;
+        /* 陀螺补偿（米制域，高通后）：旋转引起的视速度 = ω × 高度，小角度
+         * 下精确恒等、与帧率/帧间隔无关。pitch rate(gyro_y) 污染前向通道，
+         * roll rate(gyro_x) 污染右向通道。kx/ky 是无量纲方向/微调系数，
+         * 标称 ±1.0（本机实测 +1），符号由 IMU 轴向与光流轴向的相对关系
+         * 决定（tilt 测试二选一）。
+         * 两个历史教训（2026-07-04）：
+         *  - 不要改回 counts 域常数 k：旋转 counts = ω·dt_frame/scale，
+         *    dt_frame 逐帧抖动 → 常数 k 无法恒零，tilt 测试怎么调都摆动；
+         *  - 必须用高通后的陀螺：直流零偏会注入 k·bias·h 的恒定假速度，
+         *    位置线性疯跑（见 GYRO_LP_ALPHA 注释）。 */
+        vx_m -= fh->gyro_kx * (gyro_y - fh->gyro_y_lp) * height_m;
+        vy_m -= fh->gyro_ky * (gyro_x - fh->gyro_x_lp) * height_m;
 
         /* 速度 EMA 平滑（裸 flow 噪声大） */
         fh->flow_x_f += FLOW_VEL_SMOOTH * (vx_m - fh->flow_x_f);
@@ -185,7 +224,8 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
 
 void flow_hold_reset(flow_hold_t *fh)
 {
-    /* 注意：不复位 gyro_kx/ky 和 flow_scale —— 都是标定值，跨解锁保留 */
+    /* 注意：不复位 gyro_kx/ky、flow_scale（标定值）和 gyro_x/y_lp（零偏
+     * 估计，解锁瞬间零偏不会变，保留可让起飞阶段的补偿立即有效） */
     pid_reset(&fh->pid_vx);
     pid_reset(&fh->pid_vy);
     fh->setpoint_vx   = 0.0f;
@@ -201,6 +241,7 @@ void flow_hold_reset(flow_hold_t *fh)
     fh->vy_est = 0.0f;
     fh->pos_x_m = 0.0f;
     fh->pos_y_m = 0.0f;
+    fh->since_flow_s = 0.0f;
     fh->flow_x_corr = 0.0f;
     fh->flow_y_corr = 0.0f;
 }

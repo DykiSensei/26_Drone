@@ -19,7 +19,9 @@ typedef struct {
     int64_t last_update_us;  /* 上次 flow 帧时间戳（也用于测量帧间隔） */
     bool    active;          /* 是否正在输出有效修正 */
     float   gyro_kx, gyro_ky;         /* 陀螺补偿系数（米制域，无量纲，标称 ±1.0：
-                                       * 补偿量 = k × ω × 高度，tilt 测试定符号） */
+                                       * 补偿量 = k × ω_hp × 高度，tilt 测试定符号） */
+    float   gyro_x_lp, gyro_y_lp;     /* 陀螺慢变零偏估计（EMA）：补偿只用高通分量
+                                       * ω_hp = ω − ω_lp，防止直流零偏注入假速度 */
     float   flow_scale;               /* 米制换算系数 rad/count（PMW3901 系 ≈0.00244，可运行时标定）*/
     float   flow_x_f, flow_y_f;       /* 光流速度 EMA 滤波状态 (m/s) */
     float   flow_x_comp, flow_y_comp; /* 补偿+平滑后的光流速度 (m/s)（遥测/标定用） */
@@ -27,7 +29,10 @@ typedef struct {
      * predict 每帧调（100Hz）：IMU 加速度积分 + PID 输出
      * update 仅在新 flow 帧（~50Hz）：陀螺补偿 → 米制换算 → 修正 vx_est/vy_est */
     float   vx_est, vy_est;           /* IMU+flow 互补的速度估计 (m/s) */
-    float   pos_x_m, pos_y_m;         /* 航位推算位置 (m)：积分 vx_est。position 环的反馈源 */
+    float   pos_x_m, pos_y_m;         /* 航位推算位置 (m)：积分 vx_est。position 环的反馈源。
+                                       * quality_gain < FLOW_MIN_TRUST 时冻结（纯 IMU 积分
+                                       * 会被慢泄漏稳态放大 ~10×accel偏置，不可信） */
+    float   since_flow_s;             /* 距上一光流帧的累计时间 (s)，超时强制衰减信任度 */
     float   flow_x_corr, flow_y_corr; /* 上次校正用的 flow 速度 (m/s)（telemetry/调试） */
 } flow_hold_t;
 

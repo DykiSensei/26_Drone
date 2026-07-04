@@ -21,8 +21,9 @@ static setpoint_t g_sp = {
     .calib_motor  = 0,
     .move_to_x    = 0.0f,
     .move_to_y    = 0.0f,
-    .flow_kx      = -1.0f,  /* 陀螺补偿（米制域，无量纲标称 ±1，tilt 测试定符号） */
-    .flow_ky      = -1.0f,
+    .flow_kx      = 1.0f,   /* 陀螺补偿（米制域，无量纲标称 ±1；2026-07-04 tilt
+                             * 测试 +1 摆幅明显小于 −1，符号为正） */
+    .flow_ky      = 1.0f,
     .flow_scale   = 0.00244f, /* 米制换算 rad/count（PMW3901 系理论值，待试飞标定） */
     .flow_calib   = false,
     .pending_cmd  = CMD_NONE,
