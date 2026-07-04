@@ -9,6 +9,7 @@
 #include "mpu6050.h"
 #include "tof400f.h"
 #include "pv3901l1.h"
+#include "bn880_mag.h"
 #include "wifi_ap.h"
 #include "http_server.h"
 #include "commander.h"
@@ -128,11 +129,10 @@ static void execute_pending_cmd(const setpoint_t *sp)
 }
 
 static void build_telemetry(char *buf, size_t sz,
-                            const mpu6050_data_t *imu,
                             float roll, float pitch, float yaw,
                             uint16_t tof_mm,
                             const pv3901l1_data_t *flow,
-                            float pid_r, float pid_p, float pid_y)
+                            const bn880_mag_data_t *mag)
 {
     /* 位置环状态编码（前端无串口时观察）：
      *   0 = idle（无 hold、无 pending）
@@ -146,39 +146,36 @@ static void build_telemetry(char *buf, size_t sz,
         pos_state = 1;
     }
 
+    /* 平面航向（模块自身轴系，未标定未对齐——仅供接线验证：旋转机身应
+     * 看到 hdg 相应变化。正式 yaw 融合在 Mahony 九轴阶段做） */
+    float hdg = atan2f(mag->y, mag->x) * 57.29578f;
+    if (hdg < 0) hdg += 360.0f;
+
     snprintf(buf, sz,
         "{"
-        "\"accel\":[%.3f,%.3f,%.3f],"
-        "\"gyro\":[%.5f,%.5f,%.5f],"
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
-        "\"alt\":{\"target\":%.2f,\"out\":%.3f,\"vz\":%.2f},"
-        "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.2f,\"cy\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.2f,\"vy\":%.2f},"
+        "\"alt\":{\"target\":%.2f,\"vz\":%.2f},"
+        "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
+        "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
-        "\"pid\":[%.3f,%.3f,%.3f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
         "\"mode\":\"%s\""
         "}",
-        imu->accel_x, imu->accel_y, imu->accel_z,
-        imu->gyro_x, imu->gyro_y, imu->gyro_z,
         roll, pitch, yaw,
         tof_mm,
-        g_alt.target_m, g_alt_out, g_alt.vz,
+        g_alt.target_m, g_alt.vz,
         g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, flow->qual,
         g_flow_hold.quality_gain,
-        g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
-        g_flow_hold.flow_x_comp, g_flow_hold.flow_y_comp,
         pos_state, g_position.target_x, g_position.target_y,
-        (unsigned long)flow->frame_count, (unsigned long)flow->error_count,
-        (int)flow->flow_x, (int)flow->flow_y,
         g_flow_hold.vx_est, g_flow_hold.vy_est,
+        mag->x, mag->y, mag->z, hdg, mag->valid ? 1 : 0,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
         commander_get_setpoint()->mtrim[2],
         commander_get_setpoint()->mtrim[3],
-        pid_r, pid_p, pid_y,
         g_trim_roll, g_trim_pitch,
         commander_mode_name(commander_get_setpoint()->mode)
     );
@@ -199,6 +196,11 @@ void app_main(void)
     }
     if (tof400f_init() != 0) {
         printf("FATAL: tof init failed\n"); return;
+    }
+    /* 磁力计非致命：没接/接错时飞控照常工作（姿态/定高/光流都不依赖它），
+     * 遥测 mag.ok=0，前端显示未检测到 */
+    if (bn880_mag_init() != 0) {
+        ESP_LOGW(TAG, "BN-880 magnetometer not found — continuing without mag");
     }
 #if FLOW_ENABLED
     if (pv3901l1_init() != 0) {
@@ -248,7 +250,7 @@ void app_main(void)
     pv3901l1_data_t flow = {0};   /* 必须清零：首帧光流到达前 get_data 不写入，
                                    * 否则 qual/积分读到栈上垃圾值 */
     float roll = 0, pitch = 0, yaw = 0;
-    float pid_r = 0, pid_p = 0, pid_y = 0;
+    bn880_mag_data_t mag = {0};
     char  json[768];
 
     /* 固定节拍 + 实测 dt：vTaskDelayUntil 保证周期不被循环执行时间拉长，
@@ -553,8 +555,6 @@ void app_main(void)
             float out_pitch = pid_update(&pid_pitch, target_pitch_rate, imu.gyro_y, dt);
             float out_yaw   = pid_update(&pid_yaw,   target_yaw_rate,   imu.gyro_z, dt);
 
-            pid_r = out_roll; pid_p = out_pitch; pid_y = out_yaw;
-
             /* 有效油门 = 摇杆基准 + 定高修正 */
             float effective_throttle = sp->throttle + g_alt_out;
             if (effective_throttle > 1.0f) effective_throttle = 1.0f;
@@ -581,8 +581,9 @@ void app_main(void)
          * 同步发送在 WiFi 拥塞时会阻塞控制循环 —— 电机保持旧 PWM，等效失控 */
         if (++telem_div >= 5) {
             telem_div = 0;
-            build_telemetry(json, sizeof(json), &imu, roll, pitch, yaw,
-                            tof_mm, &flow, pid_r, pid_p, pid_y);
+            bn880_mag_read(&mag);   /* 20Hz 读磁力计（显示用；融合阶段再提频） */
+            build_telemetry(json, sizeof(json), roll, pitch, yaw,
+                            tof_mm, &flow, &mag);
             http_server_broadcast(json);
         }
 

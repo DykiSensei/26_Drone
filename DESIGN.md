@@ -129,6 +129,14 @@ Commander setpoint → 模式判断:
 - **累计消费语义**：每个有效帧位移累加进 `acc_x/acc_y`，`get_data` 整体取走并清零——控制端消费累计值，UART 攒批不丢帧。UART 读取用 **10ms 短超时**（原 100ms：19200 波特率下 256 字节永远凑不满 → 每次等满超时，~21 帧攒批解析 + 最新帧覆盖语义 = 丢 95% 位移，2026-07-04 教训）
 - 积分位移：flow_x_i += flow_x, flow_y_i += flow_y（双轴积分，遥测/调试用，控制反馈已改用 flow_hold 航位推算）
 
+#### BN-880 磁力计驱动 `drivers/bn880_mag.h`（2026-07-05，GPS 部分未实现）
+- 挂共享 I2C0 总线（SDA=GPIO9, SCL=GPIO8），与 MPU6050/TOF400F 共存
+- **双芯片自动探测**：BN-880 不同批次搭载 QMC5883L@0x0D（多数新批次，chip id 0xFF）或 HMC5883L@0x1E（id "H43"），init 依次探测并按芯片配置连续测量（QMC ±2G/50Hz；HMC ±1.3Ga/75Hz/8次平均）
+- ⚠️ HMC 数据寄存器顺序是 **X,Z,Y 大端**，QMC 是 X,Y,Z 小端——驱动内已各自处理
+- 输出高斯值（模块自身轴系）。**轴系对齐机体系 + 硬磁/软磁标定在 Mahony 九轴集成阶段做**，当前仅供遥测显示/接线验证（旋转机身看 hdg 变化）
+- init 失败**非致命**：飞控照常工作，遥测 `mag.ok=0`
+- 主循环 20Hz 读取（显示用；九轴融合时提频到 50-100Hz）
+
 ### 3.2 姿态估计 `estimation/attitude.h`
 
 采用 **Mahony 互补滤波器**：
@@ -360,21 +368,19 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 #### 遥测数据（ESP → 浏览器，20Hz）
 ```json
 {
-  "accel": [x, y, z],
-  "gyro": [x, y, z],
   "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
   "tof": 1234,
-  "alt": {"target": 1.20, "out": 0.015, "vz": 0.00},
-  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "cr": 0.0, "cp": 0.0},
+  "alt": {"target": 1.20, "vz": 0.00},
+  "flow": {"x": 0.0, "y": 0.0, "qual": 0, "qg": 0.0, "ps": 0, "tx": 0.0, "ty": 0.0, "vx": 0.0, "vy": 0.0},
+  "mag": {"x": 0.0, "y": 0.0, "z": 0.0, "hdg": 0.0, "ok": 1},
   "motor": [0.0, 0.0, 0.0, 0.0],
   "mtrim": [0.0, 0.0, 0.0, 0.0],
-  "pid": [0.0, 0.0, 0.0],
   "trim": {"roll": 0.0, "pitch": 0.0},
   "mode": "stabilize"
 }
 ```
 
-> 注：`battery` 字段前端已预留 UI，但 ADC 读取尚未实现，暂不回传。`trim` 字段显示当前水平修正量。
+> 2026-07-05 遥测精简：accel/gyro/pid/alt.out 及 flow 调试字段（cr/cp/cx/cy/fc/ec/fx/fy）随台架标定收官移除。`flow.qg` = 融合权重（估计器排障首看）；`mag` = BN-880 磁力计（模块轴系原始值，未标定，`ok=0` 表示未探测到）。
 
 #### 遥控指令（浏览器 → ESP，50Hz）
 ```json
@@ -401,7 +407,6 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - **油门控制**：HTML range 滑块（0–100%），直观易用
 - **Roll/Pitch 控制**：Canvas 虚拟摇杆（360° 模拟量）
 - **Yaw 控制**：底部 range 滑块（-1.0 ~ 1.0）
-- **方向键**：▲▼◀▶ 短按 ±0.5 快捷控制 roll/pitch（onmousedown/ontouchstart）
 - **模式按钮**：锁定 / 自稳 / 定高 / 悬停
   - `click` + `touchstart` 双事件绑定，解决移动端模式切换问题
   - 间隔发送 `sendStick()`（不含 mode），按钮点击调用 `send()`（含 mode），消除遥控反馈回环
@@ -531,8 +536,9 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - [ ] 起飞前自检（pre-arm check）
 - [ ] 参数系统 + NVS 持久化
 
-### Phase 5：传感器扩展（BN-880 GPS+磁力计，已购）
-- [ ] 磁力计驱动（并入 I2C0；双地址探测 HMC5883L@0x1E / QMC5883L@0x0D；硬磁/软磁标定）
+### Phase 5：传感器扩展（BN-880 GPS+磁力计，已接线）
+- [x] 磁力计驱动（并入 I2C0；双地址探测 HMC5883L@0x1E / QMC5883L@0x0D；前端显示，2026-07-05）
+- [ ] 磁力计硬磁/软磁标定 + 轴系对齐机体系
 - [ ] Mahony 九轴（磁力计 yaw 修正，解决 yaw 漂移旋转位置锁参考系的问题）
 - [ ] 光流增量按 yaw 旋转到世界系再积分（定点从机体系升级为世界系锁定）
 - [ ] GPS 接入（仅室外导航需求确认后；米级精度对室内定点无用；UART 引脚另选，GPIO44 已被光流占用）

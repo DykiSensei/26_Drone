@@ -29,11 +29,13 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 3. **Safety hardening** — calibration/trim commands DISARMED-gated; manual motor test now only works in DISARMED (bench workflow inverted vs before!); telemetry 20Hz async via `httpd_queue_work`; IMU failsafe (200ms -> DISARM); TOF staleness (500ms -> invalid, ALT_HOLD degrades to stick throttle); WS client-limit rejection.
 4. Loop timing: `vTaskDelayUntil` fixed cadence + measured dt.
 
-**Next step: flight test** — verify hover position hold and vertical takeoff with the calibrated metric pipeline, then move to the magnetometer.
+5. **BN-880 magnetometer driver + frontend cleanup (2026-07-05)** — `drivers/bn880_mag.c` probes both chip variants (QMC5883L@0x0D then HMC5883L@0x1E; HMC data order is X,Z,Y big-endian vs QMC X,Y,Z little-endian), continuous mode, gauss output in **module axes — no body-frame alignment or hard/soft-iron calibration yet** (that's the Mahony 9-axis step; current output is display/wiring-validation only). Init is non-fatal (`mag.ok=0` in telemetry when absent); read at 20Hz in the telemetry block. Web UI simplified the same day: removed IMU-raw/PID panels, flow debug rows (fps/raw/comp/corr/lock-target), GyroComp+FlowScale inputs (values are firmware defaults now; recalibrate via WS `flow_comp` command), dpad nudge buttons, battery placeholder; telemetry JSON trimmed to match (accel/gyro/pid/alt.out/flow debug fields dropped).
+
+**Next step: flight test** — verify hover position hold and vertical takeoff with the calibrated metric pipeline; validate mag wiring via the web Heading readout (rotate the drone, hdg should follow). Then Mahony 9-axis.
 
 **Sensor roadmap** (BN-880 GPS+magnetometer module purchased, plan agreed 2026-07):
 1. ✅ Metric flow + dt fix — bench-calibrated 2026-07-04, flight validation pending
-2. ⏳ **Magnetometer — next step**: BN-880 compass wires onto the existing I2C0 bus (SDA=GPIO9, SCL=GPIO8, 3.3V). Driver must probe both chip variants: HMC5883L@0x1E and QMC5883L@0x0D (BN-880 ships with either). Then extend Mahony to 9-axis (mag yaw correction) and rotate flow deltas into the world frame before integrating — fixes yaw rotation corrupting the position lock. Mount away from motors/power wires; hard/soft-iron calibration required.
+2. 🔶 **Magnetometer — driver done 2026-07-05** (dual-variant probe, telemetry+UI display). Remaining: axis alignment to body frame, hard/soft-iron calibration (rotate-and-fit), extend Mahony to 9-axis (mag yaw correction, gated by field-magnitude sanity check — bad mag corrupting yaw is worse than no mag), then rotate flow deltas into the world frame before integrating — fixes yaw rotation corrupting the position lock. Watch for motor-current magnetic interference (compare mag readings motors-off vs armed).
 3. ⏳ GPS — only if outdoor navigation is confirmed as a goal (meter-level accuracy, useless indoors / at 0.2–2m position-hold scale). UART1 RX (GPIO44) is taken by optical flow; use another UART.
 
 **Open issues from the 2026-07-02 code audit** (roughly priority-ordered):
@@ -80,8 +82,8 @@ $env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 
 | Signal | GPIO | Notes |
 |--------|------|-------|
-| I2C0 SDA | 9 | Shared: MPU6050 + TOF400F |
-| I2C0 SCL | 8 | Shared: MPU6050 + TOF400F |
+| I2C0 SDA | 9 | Shared: MPU6050 + TOF400F + BN-880 mag |
+| I2C0 SCL | 8 | Shared: MPU6050 + TOF400F + BN-880 mag |
 | UART1 RX | 44 | PV3901L1 optical flow (TX-only module) |
 | YAW_MODE | 15 | PV3901L1 yaw mode select |
 | M0 (FR, CCW) | 14 | LEDC PWM |
@@ -96,7 +98,7 @@ $env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 26_Drone/
 ├── main/main.c                 # Entry point — init then 100Hz main loop
 ├── components/
-│   ├── drivers/                # Hardware drivers (I2C, MPU6050, TOF400F, PV3901L1, Motor)
+│   ├── drivers/                # Hardware drivers (I2C, MPU6050, TOF400F, PV3901L1, BN880 mag, Motor)
 │   ├── control/                # Flight control (commander, PID, mixer, altitude, flow_hold, position)
 │   ├── communication/          # WiFi AP + HTTP/WebSocket server + embedded web frontend
 │   ├── estimation/             # Mahony AHRS attitude filter
@@ -174,6 +176,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - `mpu6050.h` — `mpu6050_init()`, `mpu6050_read()`, `mpu6050_recalibrate_gyro()`, `mpu6050_data_t`
 - `tof400f.h` — `tof400f_init()`, `tof400f_get_distance()`
 - `pv3901l1.h` — `pv3901l1_init()`, `pv3901l1_get_data()`, `pv3901l1_reset_integral()`, `pv3901l1_set_yaw_mode()`, `pv3901l1_data_t`
+- `bn880_mag.h` — `bn880_mag_init()` (probes QMC5883L@0x0D then HMC5883L@0x1E; **non-fatal** on failure), `bn880_mag_read()` (gauss, module axes — unaligned/uncalibrated until the Mahony 9-axis milestone), `bn880_mag_chip_name()`, `bn880_mag_data_t`
 - `motor.h` — `motor_init()`, `motor_set()`, `motor_stop()`, `motor_calibrate()`, `motor_calibrate_single()`
 
 **Estimation:**
@@ -206,7 +209,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 Init order in `app_main()` is critical (I2C must come first, HTTP must come last):
 
 ```
-i2c_bus_init → mpu6050_init → tof400f_init → pv3901l1_init
+i2c_bus_init → mpu6050_init → tof400f_init → bn880_mag_init (non-fatal) → pv3901l1_init
   → motor_init → attitude_init → PID init → altitude_init → flow_hold_init → position_init
   → wifi_ap_init → http_server_init
 ```

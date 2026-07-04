@@ -15,7 +15,6 @@
 ".top-bar .title{font-size:16px;font-weight:700;color:#58a6ff}\n" \
 ".top-bar .status{font-size:12px}\n" \
 ".status-ok{color:#3fb950} .status-err{color:#f85149}\n" \
-".battery{font-size:12px;color:#d2991d}\n" \
 ".container{display:flex;flex-wrap:wrap;gap:8px;padding:8px;max-width:800px;margin:0 auto}\n" \
 ".panel{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 10px}\n" \
 ".panel h3{font-size:12px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:1px}\n" \
@@ -49,9 +48,6 @@
 ".mode-btn{flex:1;min-width:60px;padding:6px 4px;font-size:12px;border:1px solid #30363d;background:#21262d;color:#8b949e;border-radius:4px;cursor:pointer}\n" \
 ".mode-btn.active{background:#238636;color:#fff;border-color:#238636}\n" \
 ".mode-btn.disarm-btn.active{background:#f85149;border-color:#f85149}\n" \
-".dpad{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;width:120px;margin:8px auto}\n" \
-".dpad-btn{padding:8px;font-size:18px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;cursor:pointer;-webkit-user-select:none;user-select:none}\n" \
-".dpad-btn:active{background:#30363d}\n" \
 ".dpad-empty{visibility:hidden}\n" \
 ".move-cross{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;width:150px;margin:8px auto}\n" \
 ".move-btn{padding:10px;font-size:20px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;-webkit-user-select:none;user-select:none;transition:background 0.1s}\n" \
@@ -66,7 +62,6 @@
 "<span class=\"title\">Drone</span>\n" \
 "<span id=\"conn-status\" class=\"status status-err\">Disconnected</span>\n" \
 "<span id=\"mode-display\" class=\"disarmed\">DISARMED</span>\n" \
-"<span id=\"battery\" class=\"battery\">--.-V</span>\n" \
 "</div>\n" \
 "<div class=\"container\">\n" \
 "<div class=\"sensors\">\n" \
@@ -75,33 +70,22 @@
 "<div class=\"data-row\"><span>Pitch</span><span id=\"att-pitch\">0.0°</span></div>\n" \
 "<div class=\"data-row\"><span>Yaw</span><span id=\"att-yaw\">0.0°</span></div>\n" \
 "</div>\n" \
-"<div class=\"panel\"><h3>IMU Raw</h3>\n" \
-"<div class=\"data-row\"><span>Accel X/Y/Z</span><span id=\"accel\">--</span></div>\n" \
-"<div class=\"data-row\"><span>Gyro X/Y/Z</span><span id=\"gyro\">--</span></div>\n" \
-"</div>\n" \
-"<div class=\"panel\"><h3>PID Output</h3>\n" \
-"<div class=\"data-row\"><span>Roll / Pitch / Yaw</span><span id=\"pid-out\">0.000 / 0.000 / 0.000</span></div>\n" \
-"</div>\n" \
 "<div class=\"panel\"><h3>TOF Altitude</h3>\n" \
 "<div class=\"data-row\"><span>Distance</span><span id=\"tof-val\">-- mm</span></div>\n" \
 "<div class=\"data-row\"><span>Target</span><span id=\"alt-target\">0.00 m</span></div>\n" \
-"<div class=\"data-row\"><span>Out (thr)</span><span id=\"alt-out\">0.000</span></div>\n" \
 "<div class=\"data-row\"><span>Vz</span><span id=\"alt-vz\">0.00 m/s</span></div>\n" \
+"</div>\n" \
+"<div class=\"panel\"><h3>Magnetometer (BN-880)</h3>\n" \
+"<div class=\"data-row\"><span>Mag X/Y/Z (G)</span><span id=\"mag-xyz\">--</span></div>\n" \
+"<div class=\"data-row\"><span>Heading (未标定)</span><span id=\"mag-hdg\">--</span></div>\n" \
 "</div>\n" \
 "<div class=\"panel\"><h3>Optical Flow Position</h3>\n" \
 "<div class=\"data-row\"><span>X (m)</span><span id=\"flow-x\">0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Y (m)</span><span id=\"flow-y\">0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Qual / 融合权重</span><span><span id=\"flow-qual\">0</span> / <span id=\"flow-qg\">0.00</span></span></div>\n" \
-"<div class=\"data-row\"><span>Module FPS / Err</span><span id=\"flow-fps\">-- / --</span></div>\n" \
-"<div class=\"data-row\"><span>Raw fx/fy (本帧)</span><span id=\"flow-raw\">0 / 0</span></div>\n" \
 "<div class=\"data-row\"><span>Vel vx/vy (m/s)</span><span id=\"flow-vel\">0.00 / 0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Pos State</span><span id=\"flow-ps\">idle</span></div>\n" \
-"<div class=\"data-row\"><span>Lock Target X/Y (m)</span><span id=\"flow-tgt\">-- / --</span></div>\n" \
 "<div class=\"data-row\"><span>Pos Err X/Y (m)</span><span id=\"flow-perr\">-- / --</span></div>\n" \
-"<div class=\"data-row\"><span>Corr R / P</span><span id=\"flow-corr\">0.0 / 0.0</span></div>\n" \
-"<div class=\"data-row\"><span>Comp x/y (m/s)</span><span id=\"flow-comp\">0.00 / 0.00</span></div>\n" \
-"<div class=\"data-row\"><span>GyroComp Kx/Ky (±1)</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"1.0\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"1.0\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
-"<div class=\"data-row\"><span>FlowScale (rad/cnt)</span><span><input id=\"gk-s\" type=\"number\" step=\"0.0002\" value=\"0.00244\" style=\"width:70px\"></span></div>\n" \
 "<div class=\"data-row\"><span>标定模式 (锁定手持标定)</span><span><button id=\"fc-btn\" onclick=\"toggleFlowCalib()\">OFF</button></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
@@ -133,17 +117,6 @@
 "<div style=\"margin:4px 0\"><label style=\"font-size:12px\">基准油门: <span id=\"takeoff-t-val\">0.40</span></label><br>\n" \
 "<input type=\"range\" id=\"takeoff-t\" min=\"0.25\" max=\"0.6\" step=\"0.01\" value=\"0.4\" style=\"width:100%\"></div>\n" \
 "<button id=\"takeoff-btn\" style=\"width:100%;margin-top:4px;padding:8px;font-size:14px;background:#238636;border-color:#2ea043;color:#fff\" onclick=\"doTakeoff()\" ontouchstart=\"event.preventDefault();doTakeoff()\">起飞</button>\n" \
-"</div>\n" \
-"<div class=\"dpad\" id=\"dpad\">\n" \
-"<div class=\"dpad-empty\"></div>\n" \
-"<button class=\"dpad-btn\" onmousedown=\"pitch=0.5\" onmouseup=\"pitch=0\" ontouchstart=\"pitch=0.5\" ontouchend=\"pitch=0\">▲</button>\n" \
-"<div class=\"dpad-empty\"></div>\n" \
-"<button class=\"dpad-btn\" onmousedown=\"roll=-0.5\" onmouseup=\"roll=0\" ontouchstart=\"roll=-0.5\" ontouchend=\"roll=0\">◀</button>\n" \
-"<div class=\"dpad-empty\"></div>\n" \
-"<button class=\"dpad-btn\" onmousedown=\"roll=0.5\" onmouseup=\"roll=0\" ontouchstart=\"roll=0.5\" ontouchend=\"roll=0\">▶</button>\n" \
-"<div class=\"dpad-empty\"></div>\n" \
-"<button class=\"dpad-btn\" onmousedown=\"pitch=-0.5\" onmouseup=\"pitch=0\" ontouchstart=\"pitch=-0.5\" ontouchend=\"pitch=0\">▼</button>\n" \
-"<div class=\"dpad-empty\"></div>\n" \
 "</div>\n" \
 "<div style=\"display:flex;justify-content:center;margin-top:6px;gap:8px\">\n" \
 "<button onclick=\"sendCmd('gyro_calib')\" ontouchstart=\"event.preventDefault();sendCmd('gyro_calib')\">陀螺仪校准</button>\n" \
@@ -209,16 +182,13 @@
 "ws.onmessage=function(e){\n" \
 "try{let d=JSON.parse(e.data);\n" \
 "if(d.attitude){$('att-roll').textContent=d.attitude.roll.toFixed(1)+'°';$('att-pitch').textContent=d.attitude.pitch.toFixed(1)+'°';$('att-yaw').textContent=d.attitude.yaw.toFixed(1)+'°'}\n" \
-"if(d.accel){$('accel').textContent=d.accel.map(v=>v.toFixed(2)).join(' / ')}\n" \
-"if(d.gyro){$('gyro').textContent=d.gyro.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
-"if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';$('alt-out').textContent=d.alt.out.toFixed(3);if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
-"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(2);$('flow-y').textContent=d.flow.y.toFixed(2);$('flow-qual').textContent=d.flow.qual;if(d.flow.qg!=null){var qge=$('flow-qg');qge.textContent=d.flow.qg.toFixed(2);qge.style.color=d.flow.qg>0.5?'#7ee787':(d.flow.qg>=0.05?'#d2991d':'#f85149')}if(d.flow.cr!=null)$('flow-corr').textContent=d.flow.cr.toFixed(1)+' / '+d.flow.cp.toFixed(1);if(d.flow.cx!=null)$('flow-comp').textContent=d.flow.cx.toFixed(2)+' / '+d.flow.cy.toFixed(2);if(d.flow.fc!=null){var now=Date.now();if(!window._fcPrev){window._fcPrev=d.flow.fc;window._fcT=now;window._fcFps=0}else if(now-window._fcT>=1000){window._fcFps=Math.round((d.flow.fc-window._fcPrev)*1000/(now-window._fcT));window._fcPrev=d.flow.fc;window._fcT=now}var fpse=$('flow-fps');fpse.textContent=window._fcFps+' fps / err '+d.flow.ec;fpse.style.color=window._fcFps>=60?'#7ee787':(window._fcFps>=20?'#d2991d':'#f85149')}if(d.flow.fx!=null)$('flow-raw').textContent=d.flow.fx+' / '+d.flow.fy;if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(2)+' / '+d.flow.vy.toFixed(2);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){$('flow-tgt').textContent=d.flow.tx.toFixed(2)+' / '+d.flow.ty.toFixed(2);var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(2)+' / '+ey.toFixed(2)}else{$('flow-tgt').textContent='-- / --';$('flow-perr').textContent='-- / --'}}}\n" \
-"if(d.battery!=null){$('battery').textContent=d.battery.toFixed(1)+'V'}\n" \
+"if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
+"if(d.mag){if(d.mag.ok){$('mag-xyz').textContent=d.mag.x.toFixed(2)+' / '+d.mag.y.toFixed(2)+' / '+d.mag.z.toFixed(2);$('mag-hdg').textContent=d.mag.hdg.toFixed(0)+'\\u00b0'}else{$('mag-xyz').textContent='-- (未检测到)';$('mag-hdg').textContent='--'}}\n" \
+"if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(2);$('flow-y').textContent=d.flow.y.toFixed(2);$('flow-qual').textContent=d.flow.qual;if(d.flow.qg!=null){var qge=$('flow-qg');qge.textContent=d.flow.qg.toFixed(2);qge.style.color=d.flow.qg>0.5?'#7ee787':(d.flow.qg>=0.05?'#d2991d':'#f85149')}if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(2)+' / '+d.flow.vy.toFixed(2);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(2)+' / '+ey.toFixed(2)}else{$('flow-perr').textContent='-- / --'}}}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
 "if(d.motor){for(let i=0;i<4;i++){let e=$('mot-'+i);if(e)e.textContent=(d.motor[i]*100).toFixed(0)}}\n" \
 "if(d.trim){$('trim-roll').textContent=d.trim.roll.toFixed(1)+'°';$('trim-pitch').textContent=d.trim.pitch.toFixed(1)+'°'}\n" \
-"if(d.pid){$('pid-out').textContent=d.pid.map(v=>v.toFixed(3)).join(' / ')}\n" \
 "if(d.mtrim){for(let i=0;i<4;i++){let e=$('mtrim-'+i);if(e)e.textContent=d.mtrim[i].toFixed(2)}}\n" \
 "}catch(ex){}\n" \
 "}\n" \
@@ -229,7 +199,6 @@
 "let toastTimer=null;function showToast(msg,warn){let t=$('toast');t.textContent=msg;t.className='toast'+(warn?' warn':'')+' show';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},1500)}\n" \
 "function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
-"function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;var s=parseFloat($('gk-s').value)||0.00244;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky,scale:s}));showToast('flow comp '+kx+' / '+ky+' scale '+s)}\n" \
 "var flowCalib=0;\n" \
 "function setFlowCalibUI(){var b=$('fc-btn');b.textContent=flowCalib?'ON':'OFF';b.style.background=flowCalib?'#238636':'';b.style.color=flowCalib?'#fff':''}\n" \
 "function toggleFlowCalib(){if(!connected)return;flowCalib=flowCalib?0:1;ws.send(JSON.stringify({cmd:'flow_calib',on:flowCalib}));setFlowCalibUI();showToast(flowCalib?'标定模式开启: 保持锁定, 手持移动飞机, 看 X(m)':'标定模式关闭',!flowCalib)}\n" \
