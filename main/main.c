@@ -153,7 +153,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
         "\"alt\":{\"target\":%.2f,\"out\":%.3f,\"vz\":%.2f},"
-        "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.2f,\"cy\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.2f,\"vy\":%.2f},"
+        "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"cr\":%.2f,\"cp\":%.2f,\"cx\":%.2f,\"cy\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"fc\":%lu,\"ec\":%lu,\"fx\":%d,\"fy\":%d,\"vx\":%.2f,\"vy\":%.2f},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"pid\":[%.3f,%.3f,%.3f],"
@@ -166,6 +166,7 @@ static void build_telemetry(char *buf, size_t sz,
         tof_mm,
         g_alt.target_m, g_alt_out, g_alt.vz,
         g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, flow->qual,
+        g_flow_hold.quality_gain,
         g_flow_hold.out_roll_deg, g_flow_hold.out_pitch_deg,
         g_flow_hold.flow_x_comp, g_flow_hold.flow_y_comp,
         pos_state, g_position.target_x, g_position.target_y,
