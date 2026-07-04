@@ -425,11 +425,14 @@ void app_main(void)
              * 但跳过速度/位置估计器复位 —— 手持移动飞机、看遥测 X(m) 即可
              * 安全标定 flow_scale，无需拆桨解锁。断连/超时复位 setpoint 时
              * flow_calib 自动清零，恢复正常复位行为；解锁起飞时低油门分支
-             * 无条件复位，手持残留不会带入飞行。 */
+             * 无条件复位，手持残留不会带入飞行。
+             * 注意：g_ax_filt/g_ay_filt 绝不能在这里清零 —— 它们是输入调理
+             * 滤波器，必须连续运行。每拍清零会让估计器的加速度直流跟踪器
+             * (ax_lp) 锚定在 0.3 折的错误基线上，模式切换瞬间输入阶跃 →
+             * 跟踪器重收敛的 ~2s 内积出 ~0.5 m/s 假速度、漂移几十 cm
+             * （2026-07-04 标定模式开启瞬间实测复现，起飞推油门同理）。 */
             if (!sp->flow_calib) {
                 flow_hold_reset(&g_flow_hold);
-                g_ax_filt = 0.0f;
-                g_ay_filt = 0.0f;
             }
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
@@ -443,8 +446,9 @@ void app_main(void)
                 flow_hold_reset(&g_flow_hold);
                 position_reset(&g_position);
                 g_position_lock_pending = false;
-                g_ax_filt = 0.0f;
-                g_ay_filt = 0.0f;
+                /* g_ax_filt/g_ay_filt 不清零：输入滤波必须连续运行，否则
+                 * 推油门瞬间加速度输入阶跃 → 起飞头 2s 出现假速度瞬态
+                 * （详见 DISARMED 分支注释） */
             } else {
             bool alt_mode = (sp->mode == MODE_ALT_HOLD || sp->mode == MODE_POS_HOLD);
 
