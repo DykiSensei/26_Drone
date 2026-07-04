@@ -160,7 +160,7 @@ MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
 | 飞机起飞后旋转（自转） | 电机方向/螺旋桨错装 | 检查 CCW/CW 桨位 |
 | 自动起飞爬不高 | 基准油门过低 | 调高到 0.4–0.45 重试 |
 | 自动起飞过冲然后掉 | 基准油门过高 / vz 阻尼不足 | 降低基准油门到 0.35–0.4 |
-| 悬停时左右抖动 | 光流陀螺补偿系数偏移 | 飞行中用 `flow_comp` 命令微调 Kx/Ky（默认 -2.5）|
+| 悬停时左右抖动 | 光流陀螺补偿符号/系数不对 | tilt 测试重定 Kx/Ky 符号（无量纲标称 ±1，默认 -1）|
 | WebSocket 断连 | 信号弱 / 同时连过多客户端 | 靠近飞机；前端会自动重连并复位为 DISARMED |
 
 ---
@@ -246,7 +246,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `CLAUDE.md`。
 {"cmd": "reset_trim"}                     // 重置水平修正量为零
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
 {"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
-{"cmd": "flow_comp", "kx": -2.5, "ky": -2.5, "scale": 0.00244}  // 光流标定：陀螺补偿系数 + 米制换算系数(rad/count)
+{"cmd": "flow_comp", "kx": -1.0, "ky": -1.0, "scale": 0.00244}  // 光流标定：陀螺补偿方向系数(无量纲±1) + 米制换算系数(rad/count)
 {"cmd": "flow_calib", "on": 1}            // 光流标定模式：锁定下估计器不复位（电机停转），手持标定用；断连自动关闭
 ```
 
@@ -311,7 +311,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `CLAUDE.md`。
 - **遥测不阻塞控制**：20Hz + httpd 任务异步发送，WiFi 拥塞时丢帧而非等待
 - **前端重连复位**：WebSocket 重连时前端复位所有控制变量并发送 DISARMED
 - **光流质量门控**：连续 quality 权重（30 起步、80 满权），低质量时冻结 PID 积分防 windup
-- **光流陀螺补偿**：扣除姿态变化引起的旋转光流污染（`flow_comp = flow − K·gyro`，实测 Kx=Ky=−2.5）
+- **光流陀螺补偿**：米制域扣除旋转视速度（`v −= K·ω·h`，K 无量纲标称 ±1，tilt 测试定符号）
 - **起飞双保险**：高度目标斜坡缓升防过冲坠机；位置锁定延迟到达目标高度后启动（避免上升阶段倾斜让光流积分噪声误判为漂移）
 - **IMU 振动抑制**：MPU6050 DLPF=4（~21Hz BW）+ 软件 EMA（~5.7Hz），防止电机振动噪声污染速度估计
 - **takeoff 命令原子化**：commander_parse 将 mode/throttle/yaw 在同一 struct 赋值中设置，消除前端"setMode + takeoff"两包之间被主循环切回 DISARMED 的竞态

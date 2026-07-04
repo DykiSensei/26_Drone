@@ -142,15 +142,20 @@ void flow_hold_update(flow_hold_t *fh, int16_t flow_x, int16_t flow_y,
     fh->last_update_us = now;
 
     if (valid) {
-        /* 陀螺补偿：在 counts/帧 域内做（kx/ky 为该域的实测标定值）。
-         * pitch rate(gyro_y) 污染 x 轴光流，roll rate(gyro_x) 污染 y 轴 */
-        float fx = (float)flow_x - fh->gyro_kx * gyro_y;
-        float fy = (float)flow_y - fh->gyro_ky * gyro_x;
-
         /* 米制换算：v = counts × (rad/count) × 高度 / 帧间隔 */
         float k_m = fh->flow_scale * height_m / dt_frame;
-        float vx_m = fx * k_m;
-        float vy_m = fy * k_m;
+        float vx_m = (float)flow_x * k_m;
+        float vy_m = (float)flow_y * k_m;
+
+        /* 陀螺补偿（米制域）：旋转引起的视速度 = ω × 高度，小角度下精确恒等、
+         * 与帧率/帧间隔无关。pitch rate(gyro_y) 污染前向通道，roll rate
+         * (gyro_x) 污染右向通道。kx/ky 是无量纲方向/微调系数，标称 ±1.0，
+         * 符号由 IMU 轴向与光流轴向的相对关系决定（tilt 测试二选一）。
+         * 千万不要改回 counts 域常数 k 补偿：旋转 counts = ω·dt_frame/scale，
+         * dt_frame 逐帧实测有抖动 → 常数 k 无法恒零（曾导致 tilt 测试怎么
+         * 调都大幅摆动），米制域的 ω·h 没有这个自由度。 */
+        vx_m -= fh->gyro_kx * gyro_y * height_m;
+        vy_m -= fh->gyro_ky * gyro_x * height_m;
 
         /* 速度 EMA 平滑（裸 flow 噪声大） */
         fh->flow_x_f += FLOW_VEL_SMOOTH * (vx_m - fh->flow_x_f);

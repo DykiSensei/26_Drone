@@ -214,7 +214,7 @@ flow_hold_predict(fh, ax_world, ay_world, dt)
 ```c
 flow_hold_update(fh, flow_x, flow_y, gyro_x, gyro_y, qual, height_m)
 ```
-- **陀螺补偿**（关键，counts 域内做）：`fx = flow_x − kx·gyro_y`、`fy = flow_y − ky·gyro_x`，扣除姿态变化引起的旋转光流，只留平移分量。PV3901L1 无内部补偿，不做会导致飞行中纠偏方向反向、定点持续漂走。（缓慢匀速倾斜调 K 使遥测 `flow.cx/cy`≈0，最优 K≈−2.5，步长 0.5）
+- **陀螺补偿**（关键，**米制域**）：`vx −= kx·gyro_y·h`、`vy −= ky·gyro_x·h`。旋转引起的视速度恒等于 ω×高度（小角度精确、与帧率无关），kx/ky 是无量纲方向/微调系数，标称 ±1.0。PV3901L1 无内部补偿，不做会导致纠偏与姿态动作耦合 → 悬停晃动、定点漂走。标定 = 定符号：标定模式下手持 ~0.5m 缓慢倾斜（≤15°、不平移），`flow.cx/cy` 跟着摆动就翻转对应 K 的符号。⚠️ 不能在 counts 域用常数 k 补偿——旋转 counts = ω·dt_frame/scale，实测 dt_frame 逐帧抖动会让任何常数 k 都无法恒零（历史教训 2026-07-04）
 - **米制换算**：`v = fx × flow_scale × height_m / dt_frame`，帧间隔 dt_frame 用 `esp_timer_get_time()` 实测（钳位 5~50ms），不假定模块帧率恒定
 - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=0.02 m/s`）：先 EMA 平滑；死区清零静止小信号防"追假速度"
 - **互补滤波修正**：`vx_est += FLOW_CORRECT_K · quality_gain · (fxd − vx_est)`（`FLOW_CORRECT_K=0.30`），新光流把 vx_est 拉向测量值的比例由 quality_gain 缩放
@@ -224,7 +224,7 @@ flow_hold_update(fh, flow_x, flow_y, gyro_x, gyro_y, qual, height_m)
 
 #### 其他
 - `flow_hold_set_velocity(vx, vy)`：设置速度指令（m/s），0=静止保持，非零=主动移动
-- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿系数（运行时标定，默认 -2.5/-2.5）
+- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿方向系数（米制域无量纲，标称 ±1，默认 -1/-1，运行时标定符号）
 - `flow_hold_set_flow_scale(scale)`：米制换算系数 rad/count（运行时试飞标定，默认 0.00244）
 - `flow_hold_reset()`：DISARMED / 低油门时清零 PID、vx_est/vy_est、pos_x_m/pos_y_m（标定值 kx/ky/scale 保留）
 - `flow_hold_is_active()`：`quality_gain > 0.01` 时返回 true

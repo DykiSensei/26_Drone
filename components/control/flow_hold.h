@@ -18,7 +18,8 @@ typedef struct {
     float   quality_gain;    /* 光流质量 EMA 平滑值 0~1 */
     int64_t last_update_us;  /* 上次 flow 帧时间戳（也用于测量帧间隔） */
     bool    active;          /* 是否正在输出有效修正 */
-    float   gyro_kx, gyro_ky;         /* 陀螺补偿系数：counts/帧 per (rad/s)，实测标定 */
+    float   gyro_kx, gyro_ky;         /* 陀螺补偿系数（米制域，无量纲，标称 ±1.0：
+                                       * 补偿量 = k × ω × 高度，tilt 测试定符号） */
     float   flow_scale;               /* 米制换算系数 rad/count（PMW3901 系 ≈0.00244，可运行时标定）*/
     float   flow_x_f, flow_y_f;       /* 光流速度 EMA 滤波状态 (m/s) */
     float   flow_x_comp, flow_y_comp; /* 补偿+平滑后的光流速度 (m/s)（遥测/标定用） */
