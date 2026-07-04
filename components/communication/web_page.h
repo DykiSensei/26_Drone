@@ -102,6 +102,7 @@
 "<div class=\"data-row\"><span>Comp x/y (m/s)</span><span id=\"flow-comp\">0.00 / 0.00</span></div>\n" \
 "<div class=\"data-row\"><span>GyroComp Kx/Ky</span><span><input id=\"gk-x\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <input id=\"gk-y\" type=\"number\" step=\"0.5\" value=\"-2.5\" style=\"width:46px\"> <button onclick=\"sendFlowComp()\">Set</button></span></div>\n" \
 "<div class=\"data-row\"><span>FlowScale (rad/cnt)</span><span><input id=\"gk-s\" type=\"number\" step=\"0.0002\" value=\"0.00244\" style=\"width:70px\"></span></div>\n" \
+"<div class=\"data-row\"><span>标定模式 (锁定手持标定)</span><span><button id=\"fc-btn\" onclick=\"toggleFlowCalib()\">OFF</button></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
 "<div class=\"controls\">\n" \
@@ -196,6 +197,7 @@
 "connected=true;setStatus(true);\n" \
 "throttle=0;roll=0;pitch=0;yaw=0;mode='disarmed';\n" \
 "motorPWM=[1000,1000,1000,1000];motorTrim=[0,0,0,0];\n" \
+"flowCalib=0;if($('fc-btn'))setFlowCalibUI();\n" \
 "$('throttle-slider').value=0;$('throttle-val').textContent='0%';\n" \
 "$('yaw-slider').value=0;$('yaw-val').textContent='0.00';\n" \
 "let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');\n" \
@@ -228,6 +230,9 @@
 "function sendCmd(c){if(connected&&ws){ws.send(JSON.stringify({cmd:c}));if(c==='gyro_calib')showToast('Gyro calibrating... (1s)');else if(c==='level_trim')showToast('Level trim captured');else if(c==='reset_trim')showToast('Trim reset to zero')}}\n" \
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
 "function sendFlowComp(){if(!connected)return;var kx=parseFloat($('gk-x').value)||0;var ky=parseFloat($('gk-y').value)||0;var s=parseFloat($('gk-s').value)||0.00244;ws.send(JSON.stringify({cmd:'flow_comp',kx:kx,ky:ky,scale:s}));showToast('flow comp '+kx+' / '+ky+' scale '+s)}\n" \
+"var flowCalib=0;\n" \
+"function setFlowCalibUI(){var b=$('fc-btn');b.textContent=flowCalib?'ON':'OFF';b.style.background=flowCalib?'#238636':'';b.style.color=flowCalib?'#fff':''}\n" \
+"function toggleFlowCalib(){if(!connected)return;flowCalib=flowCalib?0:1;ws.send(JSON.stringify({cmd:'flow_calib',on:flowCalib}));setFlowCalibUI();showToast(flowCalib?'标定模式开启: 保持锁定, 手持移动飞机, 看 X(m)':'标定模式关闭',!flowCalib)}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
 "/* Joysticks */\n" \

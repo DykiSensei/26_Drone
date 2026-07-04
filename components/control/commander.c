@@ -24,6 +24,7 @@ static setpoint_t g_sp = {
     .flow_kx      = -2.5f,  /* 陀螺补偿默认值（2026-06 实测标定） */
     .flow_ky      = -2.5f,
     .flow_scale   = 0.00244f, /* 米制换算 rad/count（PMW3901 系理论值，待试飞标定） */
+    .flow_calib   = false,
     .pending_cmd  = CMD_NONE,
 };
 
@@ -169,6 +170,13 @@ void commander_parse(const char *json, int len)
             if (cJSON_IsNumber(ky)) sp.flow_ky = (float)ky->valuedouble;
             if (cJSON_IsNumber(sc))
                 sp.flow_scale = clamp((float)sc->valuedouble, 0.0005f, 0.02f);
+        }
+        else if (strcmp(item->valuestring, "flow_calib") == 0) {
+            /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），
+             * 手持移动飞机即可安全标定 flow_scale，无需拆桨解锁 */
+            cJSON *on = cJSON_GetObjectItem(root, "on");
+            if (cJSON_IsNumber(on))    sp.flow_calib = (on->valuedouble != 0);
+            else if (cJSON_IsBool(on)) sp.flow_calib = cJSON_IsTrue(on);
         }
     }
 

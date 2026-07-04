@@ -93,6 +93,23 @@ MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
 
 > 跳过 Gyro Calib 仅做 Level Trim 会捕获带零偏的角度 → 飞行中持续漂移。
 
+4. **光流米制系数标定（flow_scale，首次飞行前必做一次）**
+
+   全程锁定状态、电机不转、**不用拆桨**：
+
+   - 找纹理丰富、光照好的地面，地上量好并标记 1.0m 距离
+   - 保持 DISARMED，点击光流面板的 **标定模式** 按钮（变绿色 ON）
+   - 手持飞机悬在地面上方约 0.5m（看 `tof` 读数稳定、`Qual` > 80）
+   - 保持高度和水平姿态，沿机头方向匀速平移 1.0m
+   - 读遥测 `X (m)` 变化量：`新 scale = 0.00244 × 实际距离 / 显示距离`
+   - 填入 FlowScale 输入框 → 点 Set → 重复平移验证显示 ≈ 实际（±10% 内即可）
+   - 点击标定模式按钮关闭（OFF）。⚠️ 数值重启即失，先记录下来
+
+5. **光流轴向验证（换装/重装光流模块后必做）**
+
+   - 手持飞机前推 → 遥测 `Raw fx` 应为正；右推 → `Raw fy` 应为正
+   - 不符说明安装方向变了 → 需改 `pv3901l1.c` parse_byte 里的机体系映射两行，并重做陀螺补偿标定（缓慢倾斜不平移，调 Kx/Ky 使 `Comp x/y` ≈ 0）
+
 ### 3. 推荐：自动起飞
 
 最稳定的起飞方式，使用斜坡式高度爬升 + 自动位置锁定：
@@ -230,6 +247,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `CLAUDE.md`。
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
 {"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
 {"cmd": "flow_comp", "kx": -2.5, "ky": -2.5, "scale": 0.00244}  // 光流标定：陀螺补偿系数 + 米制换算系数(rad/count)
+{"cmd": "flow_calib", "on": 1}            // 光流标定模式：锁定下估计器不复位（电机停转），手持标定用；断连自动关闭
 ```
 
 > ⚠️ 校准/水平修正类命令（calibrate / gyro_calib / calibrate_motor / level_trim / reset_trim）**仅在 DISARMED（锁定）下执行**，飞行中发送会被拒绝。手动电机测试（motor 数组 / All MAX 按钮）同样仅在锁定状态生效。

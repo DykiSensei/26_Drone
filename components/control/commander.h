@@ -47,6 +47,10 @@ typedef struct {
     float takeoff_throttle; /* takeoff base throttle 0.0–1.0 */
     float flow_kx, flow_ky; /* optical-flow gyro-compensation gains (runtime-tuned) */
     float flow_scale;       /* optical-flow metric scale rad/count (runtime-tuned) */
+    bool  flow_calib;       /* calibration mode: in DISARMED keep the flow estimator
+                             * running (motors stay stopped) so flow_scale can be
+                             * calibrated by hand-carrying the drone — no arming,
+                             * props stay on. Cleared on safety reset. */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

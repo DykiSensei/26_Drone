@@ -123,9 +123,10 @@ Commander setpoint → 模式判断:
 #### PV3901L1 光流驱动 `drivers/pv3901l1.h`
 - UART1 RX=GPIO44, 波特率 19200（模块仅TX端，ESP仅需接收）
 - YAW_MODE GPIO15：输出高低电平切换光流偏航模式
-- 数据包解析：帧头 0xFE 0x04，9字节包，和校验
-- 提取 flow_x, flow_y, qual（质量）
-- 积分位移：flow_x_i += flow_x, flow_y_i += flow_y（双轴积分，通过遥测返回）
+- 数据包解析：帧头 0xFE 0x04，9字节包，和校验 + 结束符双重校验
+- **安装方向映射（parse_byte 内，机体系唯一转换点）**：本机模块安装旋转了 90°（2026-07-04 实测：前移→raw_y 正、左移→raw_x 正），驱动内映射为机体系 `flow_x = raw_y`（前正）、`flow_y = −raw_x`（右正）。下游全部消费机体系值；换装模块后只改这两行并重验陀螺补偿符号
+- 提取 flow_x, flow_y, qual（质量）——均为机体系
+- 积分位移：flow_x_i += flow_x, flow_y_i += flow_y（双轴积分，遥测/调试用，控制反馈已改用 flow_hold 航位推算）
 
 ### 3.2 姿态估计 `estimation/attitude.h`
 

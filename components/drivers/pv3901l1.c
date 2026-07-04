@@ -49,9 +49,15 @@ static void parse_byte(uint8_t byte)
             bool sum_ok  = (sum == rx_buf[6]);
             bool tail_ok = (rx_buf[8] == 0xAA || rx_buf[8] == 0xBB);
             if (sum_ok && tail_ok) {
+                /* 模块原始轴 → 机体系映射（2026-07-04 实测本机安装转了 90°：
+                 * 前移→raw_y 正、左移→raw_x 正）。机体系约定：flow_x=前正、
+                 * flow_y=右正 —— 下游陀螺补偿配对/米制换算/控制符号全部依赖
+                 * 此约定。换装或旋转模块后只改这两行，并重验陀螺补偿符号。 */
+                int16_t raw_x = (int16_t)((rx_buf[3] << 8) | rx_buf[2]);
+                int16_t raw_y = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
                 portENTER_CRITICAL(&g_lock);
-                g_flow.flow_x = (int16_t)((rx_buf[3] << 8) | rx_buf[2]);
-                g_flow.flow_y = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
+                g_flow.flow_x = raw_y;              /* 机体前正 = 模块 +y */
+                g_flow.flow_y = (int16_t)(-raw_x);  /* 机体右正 = 模块 −x */
                 g_flow.qual   = rx_buf[7];
                 g_flow.flow_x_i += (float)g_flow.flow_x;
                 g_flow.flow_y_i += (float)g_flow.flow_y;

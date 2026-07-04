@@ -419,11 +419,18 @@ void app_main(void)
             pid_reset(&pid_pitch);
             pid_reset(&pid_yaw);
             altitude_reset(&g_alt);
-            flow_hold_reset(&g_flow_hold);
             position_reset(&g_position);
             g_position_lock_pending = false;
-            g_ax_filt = 0.0f;
-            g_ay_filt = 0.0f;
+            /* flow_calib 标定模式：本分支电机始终停转（上面 motor_stop），
+             * 但跳过速度/位置估计器复位 —— 手持移动飞机、看遥测 X(m) 即可
+             * 安全标定 flow_scale，无需拆桨解锁。断连/超时复位 setpoint 时
+             * flow_calib 自动清零，恢复正常复位行为；解锁起飞时低油门分支
+             * 无条件复位，手持残留不会带入飞行。 */
+            if (!sp->flow_calib) {
+                flow_hold_reset(&g_flow_hold);
+                g_ax_filt = 0.0f;
+                g_ay_filt = 0.0f;
+            }
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
             if (sp->throttle < 0.05f) {
