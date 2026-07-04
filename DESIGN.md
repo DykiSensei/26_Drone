@@ -126,6 +126,7 @@ Commander setpoint → 模式判断:
 - 数据包解析：帧头 0xFE 0x04，9字节包，和校验 + 结束符双重校验
 - **安装方向映射（parse_byte 内，机体系唯一转换点）**：本机模块安装旋转了 90°（2026-07-04 实测：前移→raw_y 正、左移→raw_x 正），驱动内映射为机体系 `flow_x = raw_y`（前正）、`flow_y = −raw_x`（右正）。下游全部消费机体系值；换装模块后只改这两行并重验陀螺补偿符号
 - 提取 flow_x, flow_y, qual（质量）——均为机体系
+- **累计消费语义**：每个有效帧位移累加进 `acc_x/acc_y`，`get_data` 整体取走并清零——控制端消费累计值，UART 攒批不丢帧。UART 读取用 **10ms 短超时**（原 100ms：19200 波特率下 256 字节永远凑不满 → 每次等满超时，~21 帧攒批解析 + 最新帧覆盖语义 = 丢 95% 位移，2026-07-04 教训）
 - 积分位移：flow_x_i += flow_x, flow_y_i += flow_y（双轴积分，遥测/调试用，控制反馈已改用 flow_hold 航位推算）
 
 ### 3.2 姿态估计 `estimation/attitude.h`
@@ -204,43 +205,43 @@ yaw   = atan2(2*(q0*q3+q1*q2), 1-2*(q2²+q3²)) * 180/PI
 ```c
 flow_hold_predict(fh, ax_world, ay_world, dt)
 ```
-- IMU 加速度积分 + 慢衰减：`vx_est = (vx_est + ax·dt) * IMU_LEAK`（`IMU_LEAK=0.999`, τ≈10s @100Hz，防 accel 偏置积爆）
-- 航位推算：`pos_x_m += vx_est·dt` —— position 环的位置反馈源（米制、含 IMU 高频信息、低质量时速度自然衰减 → 位置冻结而非积累噪声）
-- 输入是经过 **DLPF=4 硬件低通 + 软件 EMA（α=0.3, ~5.7Hz）** 双层滤波的 accel_x/y，振动噪声不会污染 vx_est
-- 跑 PID（100Hz，比旧 50Hz 多一倍带宽）：`out_pitch_deg = pid_update(pid_vx, setpoint_vx, vx_est, dt) * quality_gain`
+- **IMU 加速度通道当前权重为 0（`ACCEL_GAIN=0.0`，2026-07-04 台架定案）**：vx_est 完全由 update 的光流互补校正驱动，predict 只做慢衰减（`IMU_LEAK=0.999`）和位置积分。台架排查证明该通道是全部直流/瞬态漂移 bug 的来源（倾斜重力泄漏 g·sinθ、模式切换阶跃、急停后高通冲量回吐——高通零直流增益意味着尖峰期吸收的冲量必然在恢复期反向吐回，结构性无解），而其理论收益（补光流内部死区）在米制 0.02 m/s 小死区下可忽略。全部机制代码保留（含加速度直流跟踪 `ACCEL_LP_ALPHA`、陀螺零偏跟踪），将来 EKF/磁力计里程碑做了世界系加速度旋转后改一个常数即可恢复
+- 航位推算：`pos_x_m += vx_est·dt` —— position 环的位置反馈源
+- **光流不可信冻结**：`quality_gain < FLOW_MIN_TRUST(0.05)` 或超 0.3s 无新帧 → 冻结位置积分 + 快衰减速度估计（贴地失焦/无纹理/模块失效时，纯 IMU 积分会被慢泄漏稳态放大 ~10× 偏置 → 位置每分钟疯跑数米）
+- 跑 PID（100Hz）：`out_pitch_deg = pid_update(pid_vx, setpoint_vx, vx_est, dt) * quality_gain`
 - 低 quality 时（`quality_gain < FLOW_QUALITY_FREEZE_I=0.5`）冻结 PID 积分避免 windup
 
 #### update（仅在新光流帧调用）
 ```c
 flow_hold_update(fh, flow_x, flow_y, gyro_x, gyro_y, qual, height_m)
 ```
-- **陀螺补偿**（关键，**米制域**）：`vx −= kx·gyro_y·h`、`vy −= ky·gyro_x·h`。旋转引起的视速度恒等于 ω×高度（小角度精确、与帧率无关），kx/ky 是无量纲方向/微调系数，标称 ±1.0。PV3901L1 无内部补偿，不做会导致纠偏与姿态动作耦合 → 悬停晃动、定点漂走。标定 = 定符号：标定模式下手持 ~0.5m 缓慢倾斜（≤15°、不平移），`flow.cx/cy` 跟着摆动就翻转对应 K 的符号。⚠️ 不能在 counts 域用常数 k 补偿——旋转 counts = ω·dt_frame/scale，实测 dt_frame 逐帧抖动会让任何常数 k 都无法恒零（历史教训 2026-07-04）
-- **米制换算**：`v = fx × flow_scale × height_m / dt_frame`，帧间隔 dt_frame 用 `esp_timer_get_time()` 实测（钳位 5~50ms），不假定模块帧率恒定
+- **陀螺补偿**（关键，**米制域**）：`vx −= kx·gyro_y·h`、`vy −= ky·gyro_x·h`。旋转引起的视速度恒等于 ω×高度（小角度精确、与帧率无关），kx/ky 是无量纲方向/微调系数，标称 ±1.0。PV3901L1 无内部补偿，不做会导致纠偏与姿态动作耦合 → 悬停晃动、定点漂走。标定 = 定符号：标定模式下手持 ~0.5m 缓慢倾斜（≤15°、不平移），与 K=0 基准对比 `flow.cx/cy` 摆幅，降到三成以下即合格（手持转轴不在镜头上，杠杆臂平移是真实运动，摆幅无法归零）。**本机实测 kx=ky=+1（2026-07-04）**。两条历史教训：⚠️ 不能在 counts 域用常数 k 补偿——旋转 counts = ω·dt_frame/scale，实测 dt_frame 逐帧抖动使任何常数 k 无法恒零；⚠️ 必须用**高通后的陀螺**（`ω − ω_lp`，`GYRO_LP_ALPHA` τ≈1-2s）——直流零偏（温漂/搬动）经补偿项注入 k·bias·h 恒定假速度，1m 高度 1°/s 零偏就越过死区
+- **米制换算**：`v = 累计counts × flow_scale × height_m / 消费窗口`。counts 用驱动**累计值 acc_x/acc_y**（取走清零语义），不能用最新帧值——UART 攒批时最新帧语义丢弃批内其余帧（曾丢 95% → 幅度缩水十几倍且随机，2026-07-04 教训）；窗口时长 `esp_timer_get_time()` 实测（钳位 5~200ms）。`flow_scale` 默认 0.00244 已经 1m 平移台架验证（<10cm 浮动）
 - **速度 EMA 平滑 + 死区**（`FLOW_VEL_SMOOTH=0.3`, `FLOW_DEADBAND=0.02 m/s`）：先 EMA 平滑；死区清零静止小信号防"追假速度"
 - **互补滤波修正**：`vx_est += FLOW_CORRECT_K · quality_gain · (fxd − vx_est)`（`FLOW_CORRECT_K=0.30`），新光流把 vx_est 拉向测量值的比例由 quality_gain 缩放
-- 即使模块输出 0（连续两帧位移太小），fxd 就是 0 → vx_est 会被拉向 0（慢衰减），同时 IMU 积分仍在 predict 推进 → 短时小漂移仍可被捕捉
+- 模块输出 0（位移低于其内部死区）时 fxd=0 → vx_est 被拉向 0；0.02 m/s 死区对应的漏检漂移速率本身可忽略，无需 IMU 桥接
 - 质量门控：**连续 quality 权重**（`FLOW_QUALITY_LOW=30` 起步、`FLOW_QUALITY_HIGH=80` 满权，线性插值），EMA 平滑（`FLOW_QUALITY_SMOOTH=0.3`）。原 binary 50 切断在 qual 30-50 徘徊时完全无位置控制 → 漂走才锁
 - 高度门控：0.04m < height < 3.0m
 
 #### 其他
 - `flow_hold_set_velocity(vx, vy)`：设置速度指令（m/s），0=静止保持，非零=主动移动
-- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿方向系数（米制域无量纲，标称 ±1，默认 -1/-1，运行时标定符号）
+- `flow_hold_set_gyro_comp(kx, ky)`：设置陀螺补偿方向系数（米制域无量纲，标称 ±1，默认 +1/+1 —— 2026-07-04 本机 tilt 实测）
 - `flow_hold_set_flow_scale(scale)`：米制换算系数 rad/count（运行时试飞标定，默认 0.00244）
 - `flow_hold_reset()`：DISARMED / 低油门时清零 PID、vx_est/vy_est、pos_x_m/pos_y_m（标定值 kx/ky/scale 保留）
 - `flow_hold_is_active()`：`quality_gain > 0.01` 时返回 true
 - 修正叠加在摇杆目标角度上（±30° + ±8°），不影响飞行员操控权限
 
 ```
-                ┌─ predict @100Hz (IMU 高频快通道) ──┐
-ax/ay (DLPF+EMA)→│ vx_est += a·dt (m/s)             │── PID → 修正角 ±8°
-                │ vx_est *= IMU_LEAK               │       ↓
-                │ pos_x_m += vx_est·dt (position 反馈)│  叠加到 stick 目标角度
-                └────────────────┬───────────────────┘   → Angle P → Rate PID → Mixer
+                ┌─ predict @100Hz ─────────────────────┐
+                │ vx_est *= IMU_LEAK（accel 通道权重 0）│── PID → 修正角 ±8°
+                │ pos_x_m += vx_est·dt (position 反馈)  │       ↓
+                │ 信任度<0.05 → 冻结位置+快衰减速度      │  叠加到 stick 目标角度
+                └────────────────┬─────────────────────┘   → Angle P → Rate PID → Mixer
                                  │
-                 ┌─ update @新光流帧 (低频绝对参考) ──────────────┐
-flow_x/y, gyro → │ gyro 补偿 → ×scale×height/dt 米制 → EMA → 死区 │
-                │ vx_est += K·quality·(fxd−vx_est)              │
-                └───────────────────────────────────────────────┘
+                 ┌─ update @新光流数据（绝对参考）────────────────────────┐
+acc counts, gyro→│ ×scale×h/Δt 米制 → 减 k·ω_hp·h 陀螺补偿 → EMA → 死区  │
+                 │ vx_est += K·quality·(fxd−vx_est)                     │
+                 └──────────────────────────────────────────────────────┘
 ```
 
 ### 3.3.3 水平移动控制（Web 按钮 / P4 API）
