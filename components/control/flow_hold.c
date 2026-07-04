@@ -58,6 +58,17 @@
  * 提供，高通零偏跟踪把重力泄漏/偏置/校准残差等直流污染全部挡掉。 */
 #define ACCEL_LP_ALPHA       0.007f  /* 直流跟踪 EMA，τ≈1.5s @ 100Hz */
 
+/* IMU 加速度通道权重 —— 2026-07-04 定为 0（纯光流测速）。
+ * 直接诱因：快推急停后 X 持续增大 —— 直流跟踪器有近因偏置，急停的大幅
+ * 负向减速尖峰把 ax_lp 拉负，停稳后高通输出 = 0−(负残差) = 正假加速度，
+ * 在跟踪器重收敛的 ~1.5s 里积出前向假速度。这是结构性的：高通零直流
+ * 增益意味着尖峰期间吸收的冲量必然在恢复期反向吐回，调 τ 只是改创口形状。
+ * 根本权衡：该通道的理论收益（补光流死区）在米制化 + 0.02 m/s 小死区后
+ * 已可忽略（死区对应漂移速率 2cm/s；帧率 20-100fps 无需桥接），而它贡献
+ * 了全部四类直流/瞬态 bug（重力泄漏、切换阶跃、急停残差、泄漏放大）。
+ * 机制代码保留：将来上 EKF/磁力计做世界系加速度旋转后改此值即可恢复。 */
+#define ACCEL_GAIN           0.0f
+
 void flow_hold_init(flow_hold_t *fh)
 {
     pid_init(&fh->pid_vx, FLOW_KP, FLOW_KI, FLOW_KD,
@@ -117,10 +128,10 @@ void flow_hold_predict(flow_hold_t *fh, float ax_world, float ay_world, float dt
         fh->vx_est *= VX_FAST_DECAY;
         fh->vy_est *= VX_FAST_DECAY;
     } else {
-        /* IMU 加速度积分（仅高通分量，见 ACCEL_LP_ALPHA 注释）+ 慢衰减。
-         * 米制统一后 m/s² × s 直接得 m/s，与光流通道量纲一致。 */
-        fh->vx_est = (fh->vx_est + (ax_world - fh->ax_lp) * dt) * IMU_LEAK;
-        fh->vy_est = (fh->vy_est + (ay_world - fh->ay_lp) * dt) * IMU_LEAK;
+        /* 速度推进：加速度只取高通分量并乘 ACCEL_GAIN（当前 0 = 纯光流
+         * 测速，vx_est 由 update 的互补校正驱动，此处仅慢衰减）。 */
+        fh->vx_est = (fh->vx_est + ACCEL_GAIN * (ax_world - fh->ax_lp) * dt) * IMU_LEAK;
+        fh->vy_est = (fh->vy_est + ACCEL_GAIN * (ay_world - fh->ay_lp) * dt) * IMU_LEAK;
 
         /* 航位推算位置（m）：积分融合速度。position 环用它做锁定反馈 */
         fh->pos_x_m += fh->vx_est * dt;
