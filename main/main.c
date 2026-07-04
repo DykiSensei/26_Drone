@@ -368,11 +368,11 @@ void app_main(void)
          * accel_x/y 直接当世界系水平加速度用（小角度悬停 cos<10° → 误差 <3%）。 */
         g_ax_filt += ACCEL_EMA_ALPHA * (imu.accel_x - g_ax_filt);
         g_ay_filt += ACCEL_EMA_ALPHA * (imu.accel_y - g_ay_filt);
-        /* accel_x 取反：IMU（Z 朝上）和下视光流相机两套右手系的 x/y 轴
-         * 不可能同时同向，必然恰好有一轴反向。本机实测光流 前/右 = 正，
-         * 而 IMU 安装 X 朝后（由 rate 环符号 + mixer 约定反推）：
-         * accel_x = -前向加速度 → x 轴取反；accel_y = +右向加速度 → 同向。
-         * 接错则 predict 与光流校正互相拉扯，速度估计振荡。 */
+        /* accel 轴向映射（2026-07-04 快推实测验证，不再是推导值）：
+         *   快推前 → accel_x 读负 ⇒ IMU X 朝后 ⇒ 取反后 = 机体前向加速度；
+         *   快推左 → accel_y 读负 ⇒ IMU Y 朝右 ⇒ 直通   = 机体右向加速度。
+         * 与光流机体系（前/右=正）一致。接错则 predict 与光流校正互相
+         * 拉扯，速度估计振荡。 */
         flow_hold_predict(&g_flow_hold, -g_ax_filt, g_ay_filt, dt);
 
         if (flow_new == 0) {
