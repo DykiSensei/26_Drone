@@ -8,9 +8,14 @@ ESP32-S3 quadcopter flight controller based on ESP-IDF 5.5.4. WiFi AP + WebSocke
 
 Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calibration procedures for humans are in `README.md`.
 
-## Current Status & TODO (last updated 2026-07-04)
+## Current Status & TODO (last updated 2026-07-05)
 
-**Flight-verified**: STABILIZE, ALT_HOLD (vz damping + takeoff target ramp), auto-takeoff, per-motor trim.
+**Flight-verified**: STABILIZE, ALT_HOLD (vz damping + takeoff target ramp), auto-takeoff, per-motor trim. **Metric flow pipeline flight-validated 2026-07-05**: attitude very stable, hover position drift ~30cm — and **yaw is nearly constant in flight**, so the drift is NOT lock-frame rotation (this finding deprioritized the magnetometer, see roadmap).
+
+**Current priority — shrink the ~30cm hover drift** (all-flow levers, no new hardware):
+1. Hover lower (~0.5m): flow quantization noise scales with height — 1 count = 0.12 m/s at 1m, half that at 0.5m. Cheapest first test.
+2. Raise position-loop gain: `POS_KP` 1.5 → 2.0–2.5 in `position.c` (watch for lock-point oscillation), optionally velocity `FLOW_KP` 8 → 10–12 in `flow_hold.c`.
+3. Better floor texture / lighting raises qual → stronger flow correction.
 
 **Done & bench-calibrated 2026-07-04 — NOT yet flight-tested** (builds clean for esp32s3):
 1. **Metric flow pipeline** — all horizontal control in m/s / meters (details in Architecture below); fixed the 5-10x altitude-dependent loop-gain drift that caused hover instability and takeoff lateral drift. Bench-confirmed constants, all now code defaults (still lost on reboot — no NVS yet, but defaults match bench values):
@@ -29,14 +34,12 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 3. **Safety hardening** — calibration/trim commands DISARMED-gated; manual motor test now only works in DISARMED (bench workflow inverted vs before!); telemetry 20Hz async via `httpd_queue_work`; IMU failsafe (200ms -> DISARM); TOF staleness (500ms -> invalid, ALT_HOLD degrades to stick throttle); WS client-limit rejection.
 4. Loop timing: `vTaskDelayUntil` fixed cadence + measured dt.
 
-5. **BN-880 magnetometer driver + frontend cleanup (2026-07-05)** — `drivers/bn880_mag.c` probes three chip variants (QMC5883L@0x0D, HMC5883L@0x1E, IST8310@0x0E; HMC data order is X,Z,Y big-endian vs QMC/IST X,Y,Z little-endian; IST is single-measurement mode, re-triggered each read). On total probe failure it scans the whole bus and logs every ACKing address (only 0x29/0x68 = compass unpowered/not on bus). ⚠️ First hardware attempt 2026-07-05: neither 0x0D nor 0x1E answered with wiring reportedly correct — awaiting scan output to identify variant vs wiring fault. Gauss output in **module axes — no body-frame alignment or hard/soft-iron calibration yet** (that's the Mahony 9-axis step; current output is display/wiring-validation only). Init is non-fatal (`mag.ok=0` in telemetry when absent); read at 20Hz in the telemetry block. Web UI simplified the same day: removed IMU-raw/PID panels, flow debug rows (fps/raw/comp/corr/lock-target), GyroComp+FlowScale inputs (values are firmware defaults now; recalibrate via WS `flow_comp` command), dpad nudge buttons, battery placeholder; telemetry JSON trimmed to match (accel/gyro/pid/alt.out/flow debug fields dropped).
-
-**Next step: flight test** — verify hover position hold and vertical takeoff with the calibrated metric pipeline; validate mag wiring via the web Heading readout (rotate the drone, hdg should follow). Then Mahony 9-axis.
+5. **BN-880 magnetometer driver + frontend cleanup (2026-07-05)** — `drivers/bn880_mag.c` probes three chip variants (QMC5883L@0x0D, HMC5883L@0x1E, IST8310@0x0E; HMC data order is X,Z,Y big-endian vs QMC/IST X,Y,Z little-endian; IST is single-measurement mode, re-triggered each read). On total probe failure it scans the whole bus and logs every ACKing address (only 0x29/0x68 = compass unpowered/not on bus). Gauss output in **module axes — no body-frame alignment or hard/soft-iron calibration yet** (that's the Mahony 9-axis step). ⚠️ **Hardware unresolved & PARKED (user decision 2026-07-05)**: compass never ACKed (vendor says "QMC5883"); flight test showed yaw nearly constant → drift is not yaw-induced → mag priority dropped. When resumed: flash latest firmware via the native-USB port, read the boot-log bus scan — unknown address = new variant to support (QMC5883P is 0x2C); only 0x29/0x68 = module-side hardware fault (check power LED, feed VCC 5V, verify silk-vs-cable pin order, continuity SDA→GPIO9/SCL→GPIO8). Init is non-fatal (`mag.ok=0` in telemetry when absent); read at 20Hz in the telemetry block. Web UI simplified the same day: removed IMU-raw/PID panels, flow debug rows (fps/raw/comp/corr/lock-target), GyroComp+FlowScale inputs (values are firmware defaults now; recalibrate via WS `flow_comp` command), dpad nudge buttons, battery placeholder; telemetry JSON trimmed to match (accel/gyro/pid/alt.out/flow debug fields dropped).
 
 **Sensor roadmap** (BN-880 GPS+magnetometer module purchased, plan agreed 2026-07):
-1. ✅ Metric flow + dt fix — bench-calibrated 2026-07-04, flight validation pending
-2. 🔶 **Magnetometer — driver done 2026-07-05** (dual-variant probe, telemetry+UI display). Remaining: axis alignment to body frame, hard/soft-iron calibration (rotate-and-fit), extend Mahony to 9-axis (mag yaw correction, gated by field-magnitude sanity check — bad mag corrupting yaw is worse than no mag), then rotate flow deltas into the world frame before integrating — fixes yaw rotation corrupting the position lock. Watch for motor-current magnetic interference (compare mag readings motors-off vs armed).
-3. ⏳ GPS — only if outdoor navigation is confirmed as a goal (meter-level accuracy, useless indoors / at 0.2–2m position-hold scale). UART1 RX (GPIO44) is taken by optical flow; use another UART.
+1. ✅ Metric flow + dt fix — bench-calibrated 2026-07-04, **flight-validated 2026-07-05** (stable attitude, ~30cm drift)
+2. ⏸️ **Magnetometer — PARKED 2026-07-05**: driver complete (3-variant probe + bus-scan diagnostic) but the compass never ACKs on the bus (hardware fault suspected, see item 5 above for the resume checklist). Priority dropped because flight showed yaw nearly constant — the yaw-drift benefit doesn't apply; still needed later for heading hold / yaw-proof world-frame position / P4 multi-step maneuvers / GPS.
+3. ⏸️ GPS — parked with the mag; only for outdoor navigation (meter-level accuracy, useless indoors). UART1 RX (GPIO44) is taken by optical flow; use another UART.
 
 **Open issues from the 2026-07-02 code audit** (roughly priority-ordered):
 - `setpoint_t` torn reads: main loop dereferences the live `g_sp` pointer many times per iteration — copy the struct once per loop under a small lock; `pending_cmd` is a single slot that can drop a command arriving between execute and clear — replace with a FreeRTOS queue
