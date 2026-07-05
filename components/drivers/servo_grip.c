@@ -14,10 +14,11 @@ static const char *TAG = "servo_grip";
 #define GRIP_RESOLUTION   LEDC_TIMER_14_BIT
 #define GRIP_MAX_DUTY     ((1 << 14) - 1)  /* 16383 → ~1.22us/步，远小于 MG995 死区 */
 
-/* ── 脉宽 ↔ 角度（沿用 esp32s3-mg995-servo-web 库已验证参数）── */
+/* ── 脉宽 ↔ 角度（沿用 esp32s3-mg995-servo-web 库已验证参数）──
+ * 映射保持全量程 0–180°↔500–2500µs；可用范围由 SERVO_GRIP_MAX_DEG 硬限位 */
 #define GRIP_MIN_PULSE_US 500              /* 0° */
 #define GRIP_MAX_PULSE_US 2500             /* 180° */
-#define GRIP_ANGLE_MAX    180.0f
+#define GRIP_ANGLE_FULL   180.0f           /* 脉宽映射满量程（勿用于钳位） */
 
 /* 限速逼近速度：90° 行程约 0.75s。太快 = 电流尖峰 + 飞行中反扭矩 */
 #define GRIP_SPEED_DPS    120.0f
@@ -29,7 +30,7 @@ static float g_angle_target = SERVO_GRIP_OPEN_DEG;
 static void grip_write(float deg)
 {
     float pulse_us = GRIP_MIN_PULSE_US
-                   + deg / GRIP_ANGLE_MAX * (float)(GRIP_MAX_PULSE_US - GRIP_MIN_PULSE_US);
+                   + deg / GRIP_ANGLE_FULL * (float)(GRIP_MAX_PULSE_US - GRIP_MIN_PULSE_US);
     uint32_t duty = (uint32_t)((float)GRIP_MAX_DUTY * pulse_us / (float)GRIP_PERIOD_US);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, GRIP_LEDC_CH, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, GRIP_LEDC_CH);
@@ -38,7 +39,9 @@ static void grip_write(float deg)
 static float clamp_angle(float deg)
 {
     if (deg < 0.0f) return 0.0f;
-    if (deg > GRIP_ANGLE_MAX) return GRIP_ANGLE_MAX;
+    /* 硬限位 90°：齿条行程极限，超过舵机空转打滑（2026-07-05 台架实测）。
+     * 这里是最后一道防线——无论 commander/前端/未来 P4 状态机发什么都钳住 */
+    if (deg > SERVO_GRIP_MAX_DEG) return SERVO_GRIP_MAX_DEG;
     return deg;
 }
 

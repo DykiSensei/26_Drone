@@ -182,7 +182,8 @@ void commander_parse(const char *json, int len)
             cJSON *ang = cJSON_GetObjectItem(root, "angle");
             cJSON *act = cJSON_GetObjectItem(root, "action");
             if (cJSON_IsNumber(ang))
-                sp.grip_angle = clamp((float)ang->valuedouble, 0.0f, 180.0f);
+                sp.grip_angle = clamp((float)ang->valuedouble,
+                                      0.0f, SERVO_GRIP_MAX_DEG);
             else if (cJSON_IsString(act)) {
                 if (strcmp(act->valuestring, "open") == 0)
                     sp.grip_angle = SERVO_GRIP_OPEN_DEG;

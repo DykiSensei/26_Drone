@@ -142,8 +142,8 @@
 "<button style=\"flex:1\" onclick=\"gripAction('open')\" ontouchstart=\"event.preventDefault();gripAction('open')\">张开</button>\n" \
 "<button style=\"flex:1\" onclick=\"gripAction('close')\" ontouchstart=\"event.preventDefault();gripAction('close')\">闭合</button>\n" \
 "</div>\n" \
-"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">调试角度: <span id=\"grip-slider-val\">90</span>°</label><br>\n" \
-"<input type=\"range\" id=\"grip-slider\" min=\"0\" max=\"180\" step=\"1\" value=\"90\" style=\"width:100%\"></div>\n" \
+"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">调试角度 (0=张开, 90=闭合): <span id=\"grip-slider-val\">0</span>°</label><br>\n" \
+"<input type=\"range\" id=\"grip-slider\" min=\"0\" max=\"90\" step=\"1\" value=\"0\" style=\"width:100%\"></div>\n" \
 "</div>\n" \
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
 "<h3>Motor Trim <span style=\"font-size:10px;color:#8b949e\">(补偿硬件差异)</span></h3>\n" \

@@ -6,12 +6,13 @@
 extern "C" {
 #endif
 
-/* 机械爪开/合预设角（度）。爪体机构行程未实测——先取保守默认，台架上用
- * 前端调试滑条找到实际开/合角后回填这两个宏。
- * 闭合角务必设为"刚好夹紧"而非机构极限：夹住目标后舵机堵转（MG995 堵转
- * 电流 1A+），顶着极限角持续堵转会过热。 */
-#define SERVO_GRIP_OPEN_DEG    90.0f
-#define SERVO_GRIP_CLOSE_DEG   150.0f
+/* 机械爪开/合角（2026-07-05 台架实测）：0° 完全张开，90° 完全闭合。
+ * ⚠️ 90° 时齿条行程用尽，再往上舵机空转打滑——SERVO_GRIP_MAX_DEG 是驱动层
+ * 硬限位，clamp 在驱动内部执行，任何上层调用都不可能越过。
+ * 机械爪兼作起落架：地面停放/上电默认必须完全张开（OPEN=0°，init 即输出）。 */
+#define SERVO_GRIP_OPEN_DEG    0.0f
+#define SERVO_GRIP_CLOSE_DEG   90.0f
+#define SERVO_GRIP_MAX_DEG     90.0f   /* 机械硬限位：齿条行程极限，超过即空转 */
 
 /**
  * @brief 初始化机械爪舵机（LEDC TIMER_1 / 通道 4，50Hz，GPIO10）
