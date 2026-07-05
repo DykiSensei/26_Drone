@@ -6,20 +6,27 @@
 
 static const char *TAG = "grab";
 
-/* ── 任务参数（调参入口，联调后按实测回填） ── */
-#define ALIGN_TOL_M        0.08f  /* 对准容差：|dx|,|dy| 都小于此才算对上 */
+/* ── 任务参数（调参入口，联调后按实测回填）──
+ * 工作高度按 ~1.7m 巡航设计（用户 2026-07-05 确认）：下降行程 ~1.5m，
+ * 0.3 m/s 斜坡本身就要 5s，超时都留了余量。 */
+#define ALIGN_TOL_MIN_M    0.08f  /* 对准容差下限（低空/视觉地板处生效） */
+#define ALIGN_TOL_K        0.15f  /* 容差随高度放宽: tol = max(0.08, 0.15*h)。
+                                   * 1.7m 时 ≈0.26m —— 光流定位噪声随高度线性
+                                   * 变大（1 count @1.7m ≈ 0.2 m/s），高空只做
+                                   * 粗对准，精对准留给低空台阶 */
 #define ALIGN_OK_N         3      /* 连续 N 条容差内测量才进入下降 */
 #define ALIGN_CORR_GAP_S   1.0f   /* 两次视觉修正最小间隔（等位置环稳定，边降边修节奏） */
-#define ALIGN_TIMEOUT_S    20.0f
+#define ALIGN_TIMEOUT_S    20.0f  /* 单级高度上的对准超时（每级台阶完成后重置） */
+#define MISSION_TIMEOUT_S  120.0f /* 任务总超时兜底（1.7m 分段全流程 ~30-60s） */
 #define VISION_FLOOR_M     0.35f  /* TOF 低于此不再对准（相机近距盲区），转末段开环 */
-#define DESCEND_STEP_M     0.15f  /* ALIGN 阶段每级台阶下降量 */
+#define DESCEND_STEP_M     0.25f  /* ALIGN 阶段每级台阶下降量（1.7m→0.35m 约 6 级） */
 #define STEP_SETTLE_TOL_M  0.08f  /* 台阶到位判据 */
-#define DESCEND_TIMEOUT_S  12.0f
+#define DESCEND_TIMEOUT_S  20.0f  /* 末段/测试直降：1.7m→0.1m 斜坡 5.3s + PID 滞后余量 */
 #define GRASP_SETTLE_S     0.3f   /* 爪到位后再夹稳一会 */
 #define GRASP_TIMEOUT_S    3.0f   /* 爪 0.75s 应到位；超时按已完成处理 */
 #define ASCEND_TOL_M       0.10f
 #define VZ_STEADY_MS       0.15f  /* 垂直稳定判据 m/s */
-#define ASCEND_TIMEOUT_S   10.0f
+#define ASCEND_TIMEOUT_S   15.0f  /* 回升 1.5m 斜坡 5s + 余量 */
 #define START_MARGIN_M     0.10f  /* 启动时须高于触发高度至少这么多 */
 #define GRAB_TOF_MIN_M     0.10f  /* 触发高度可调范围（TOF 落地读数≈0.20） */
 #define GRAB_TOF_MAX_M     0.50f
@@ -159,6 +166,10 @@ void grab_mission_update(grab_mission_t *gm, const setpoint_t *sp,
         mission_abort_internal(gm, alt, tof_mm, "TOF 失效");
         return;
     }
+    if (since_s(gm->mission_since_us) > MISSION_TIMEOUT_S) {
+        mission_abort_internal(gm, alt, tof_mm, "任务总超时");
+        return;
+    }
     float tof_m = tof_mm * 0.001f;
 
     switch (gm->state) {
@@ -174,12 +185,17 @@ void grab_mission_update(grab_mission_t *gm, const setpoint_t *sp,
                 && fabsf(alt->vz) < VZ_STEADY_MS) {
                 gm->align_stepping = false;
                 gm->align_ok_cnt = 0;   /* 新高度重新确认对准 */
+                gm->state_since_us = esp_timer_get_time();  /* 每级台阶重置
+                                        * 对准计时——1.7m 分段下来总时长远超
+                                        * 单级 20s，超时按"本级高度"计 */
             }
             break;
         }
         if (meas->valid) {
             float err = fmaxf(fabsf(meas->dx_m), fabsf(meas->dy_m));
-            if (err < ALIGN_TOL_M) {
+            /* 容差随高度放宽：高空光流定位噪声大，只做粗对准 */
+            float tol = fmaxf(ALIGN_TOL_MIN_M, ALIGN_TOL_K * tof_m);
+            if (err < tol) {
                 gm->align_ok_cnt++;
             } else {
                 gm->align_ok_cnt = 0;

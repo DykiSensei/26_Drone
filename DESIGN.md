@@ -615,7 +615,7 @@ move_to 链路修正 → 分段下降（边降边修）→ 末段 20–30cm 开�
 - [ ] 抓取后降落策略（抓着目标时爪=起落架不可用：先松爪投放，或落在目标上——待定）
 - [x] S3↔P4 串口协议 v1 定稿（§3.10 + `communication/p4link_protocol.h`，2026-07-05 —— ⚠️ 理论设计，P4 未就绪不可实测）
 - [x] p4link S3 侧驱动（`communication/p4link.c`：UART2 TX=GPIO17/RX=GPIO18；`p4link_rx` 任务 + 解析状态机 + take 语义交付；主循环 50Hz STATE 广播 + 四道安全门 + 准静态门，2026-07-05——编译通过，无对端静默待机）
-- [x] 抓取任务状态机（`control/grab_mission.c`：IDLE→ALIGN(P4 边降边修, 视觉地板 0.35m)→DESCEND→GRASP(TOF 触发闭爪, 默认 0.20m=TOF 落地读数, 前端 grab_cfg 可调)→ASCEND→IDLE；全局中止=模式退出/油门切断/TOF失效；中止绝不张爪；**前端"测试抓取"无 P4 触发**（跳过 ALIGN，假设位置精确），2026-07-05——⚠️ 台架/实飞未测）
+- [x] 抓取任务状态机（`control/grab_mission.c`：IDLE→ALIGN(P4 边降边修, 容差随高度放宽 max(8cm,0.15h), 台阶 0.25m, 视觉地板 0.35m)→DESCEND→GRASP(TOF 触发闭爪, 默认 0.20m=TOF 落地读数, 前端 grab_cfg 可调)→ASCEND→IDLE；**参数按 ~1.7m 工作巡航高度设计**；全局中止=模式退出/油门切断/TOF失效/120s总超时；中止绝不张爪；**前端"测试抓取"无 P4 触发**（跳过 ALIGN，假设位置精确），2026-07-05——⚠️ 台架/实飞未测）
 - [ ] 抓取测试实飞（悬停→测试抓取→验证触发高度/闭爪时序/回升；调 grab_cfg 滑条回填默认值）
 - [ ] 协议联调（P4 就绪后：CRC 互通 / 丢帧率 / ts_echo 陈旧度标定 / 投影精度端到端 / ALIGN 全流程，清单见 §3.10）
 - [ ] 抓取任务状态机（SEARCH → ALIGN → 分段 DESCEND → GRAB → ASCEND；末段 TOF 测的是目标顶面，可用作闭爪时机）
