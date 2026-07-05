@@ -13,13 +13,16 @@
 | 激光测距 | TOF400F (VL53L1X) | I2C | 0x29 (VL53L1X 直通) | 定高（4cm–4m） |
 | 光流 | PV3901L1 | UART + GPIO | RX=GPIO44, YAW_MODE=GPIO15, 波特率 19200 | 水平位置悬停 |
 | 电机×4 | 无刷电机 + 电调 | PWM | 4路 LEDC | 动力输出 |
+| GPS+磁力计 | BN-880 | I2C（磁力计） | 0x0D/0x1E/0x0E 三变体自动探测（当前硬件无应答，⏸️暂缓） | 航向（暂缓）；GPS 待定 |
+| 机械爪舵机 | MG995 | LEDC PWM | GPIO10, 50Hz, 500–2500µs；⚠️独立 5V BEC 供电（堵转 1A+） | 抓取目标（0 自由度爪） |
 
 ### 1.2 总线分配
 
 ```
 I2C0 (共用总线):
   ├── MPU6050   SDA=GPIO9  SCL=GPIO8  (I2C addr: 0x68, 400kHz)
-  └── TOF400F   SDA=GPIO9  SCL=GPIO8  (I2C addr: 0x29, 400kHz, VL53L1X 直连)
+  ├── TOF400F   SDA=GPIO9  SCL=GPIO8  (I2C addr: 0x29, 400kHz, VL53L1X 直连)
+  └── BN-880磁力计 SDA=GPIO9 SCL=GPIO8 (0x0D/0x1E/0x0E 三变体探测；当前无应答，⏸️暂缓)
 
 UART1:
   └── PV3901L1  RX=GPIO44               (光流数据接收，模块仅TX端)
@@ -27,11 +30,14 @@ UART1:
 GPIO:
   └── YAW_MODE  GPIO15                 (光流偏航模式选择)
 
-LEDC PWM (4通道):
-  ├── M0 (FR): GPIO14
-  ├── M1 (FL): GPIO11
-  ├── M2 (RL): GPIO13
-  └── M3 (RR): GPIO12
+LEDC PWM:
+  ├── TIMER_0 400Hz (电机):
+  │   ├── M0 (FR): GPIO14  [CH0]
+  │   ├── M1 (FL): GPIO11  [CH1]
+  │   ├── M2 (RL): GPIO13  [CH2]
+  │   └── M3 (RR): GPIO12  [CH3]
+  └── TIMER_1 50Hz (舵机):
+      └── 机械爪 MG995: GPIO10  [CH4]  (500–2500µs ↔ 0–180°)
 
 System:
   └── RGB LED: GPIO48  (状态指示，WS2812)
@@ -525,7 +531,7 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 ### Phase 3：高级飞行模式
 - [x] 定高模式（TOF PID 高度环 + vz 阻尼 + 起飞目标斜坡）
 - [x] 光流速度保持（IMU+光流互补滤波速度环）+ 位置保持/move_to
-- [x] **水平控制链路全米制化**（光流按 TOF 高度换算 m/s、位置反馈航位推算，2026-07-02 —— 修复环增益随高度漂移导致的定点不稳/起飞漂移，**待试飞验证**）
+- [x] **水平控制链路全米制化**（光流按 TOF 高度换算 m/s、位置反馈航位推算，2026-07-02 —— 修复环增益随高度漂移导致的定点不稳/起飞漂移，**2026-07-05 试飞验证通过**）
 - [x] WiFi 遥控 + 遥测（WebSocket 已实现，遥测 20Hz 异步）
 - [x] 失控保护 + 安全逻辑（命令超时/断连 → DISARMED，校准命令地面闸门，电机测试仅限锁定，IMU/TOF 失效保护，2026-07-02 加固）
 
@@ -544,6 +550,14 @@ Motor[3] = throttle - roll - pitch - yaw   // 后右 (RR, CW)
 - [ ] Mahony 九轴（磁力计 yaw 修正，解决 yaw 漂移旋转位置锁参考系的问题）
 - [ ] 光流增量按 yaw 旋转到世界系再积分（定点从机体系升级为世界系锁定）
 - [ ] GPS 接入（仅室外导航需求确认后；米级精度对室内定点无用；UART 引脚另选，GPIO44 已被光流占用）
+
+### Phase 6：视觉伺服抓取（最终目标，2026-07-05 确认方案）
+S3↔P4 串口协作：S3 发高度+姿态 → P4（相机装在爪末端）解算目标偏差 (dx,dy) → S3 走现有
+move_to 链路修正 → 分段下降（边降边修）→ 末段 20–30cm 开环 → 闭爪抓取（MG995，0 自由度）。
+- [x] 机械爪舵机驱动 `drivers/servo_grip.c`（GPIO10, LEDC TIMER_1/CH4 50Hz，限速逼近防电流尖峰/反扭；WS `grip` 命令 + 前端调试面板 + 遥测 `grip` 字段，2026-07-05——**台架未测**，开/合预设角待实测回填）
+- [ ] 机械爪台架标定（前端滑条实测开/合角 → 回填 `SERVO_GRIP_OPEN/CLOSE_DEG`；闭合角设"刚好夹紧"防持续堵转）
+- [ ] S3↔P4 串口协议（帧头+长度+CRC；P4 输入按不可信传感器处理：限幅 ±1m、置信度门控、超时中止）
+- [ ] 抓取任务状态机（SEARCH → ALIGN → 分段 DESCEND → GRAB → ASCEND；末段 TOF 测的是目标顶面，可用作闭爪时机）
 
 ---
 

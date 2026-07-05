@@ -51,6 +51,8 @@ typedef struct {
                              * running (motors stay stopped) so flow_scale can be
                              * calibrated by hand-carrying the drone — no arming,
                              * props stay on. Cleared on safety reset. */
+    float grip_angle;       /* 机械爪目标角 0–180°（任意模式生效；失联复位时保留，
+                             * 防止断连瞬间松爪掉落已抓取的目标） */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

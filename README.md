@@ -14,20 +14,22 @@
 | 激光测距 | TOF400F (VL53L1X) | I2C | 0x29 |
 | 光流 | PV3901L1 | UART | RX=GPIO44, 波特率 19200 |
 | 电机×4 | 无刷电机 + 电调 | LEDC PWM | 400Hz |
-| GPS+磁力计 | BN-880 | 磁力计 I2C（**驱动已完成**）/ GPS UART（待定） | 磁力计并入 I2C0，驱动自动探测 HMC5883L(0x1E) / QMC5883L(0x0D) 两种出厂变体 |
+| GPS+磁力计 | BN-880 | 磁力计 I2C（**驱动已完成，硬件待查**）/ GPS UART（待定） | 磁力计并入 I2C0，驱动自动探测 QMC5883L(0x0D) / HMC5883L(0x1E) / IST8310(0x0E) 三种出厂变体，全部失败时打印总线扫描结果。⚠️ 当前模块罗盘无应答（疑似硬件故障，已暂缓，见 CLAUDE.md 排查清单） |
+| 机械爪舵机 | MG995 | LEDC PWM | GPIO10, 50Hz, 500–2500µs ↔ 0–180°。⚠️ 必须独立 5V BEC 供电（堵转电流 1A+，与逻辑电共轨会在闭爪瞬间拉复位主控） |
 
 ## 引脚分配
 
 | 信号 | GPIO | 说明 |
 |------|------|------|
-| I2C0 SDA | 9 | 共用：MPU6050 + TOF400F |
-| I2C0 SCL | 8 | 共用：MPU6050 + TOF400F |
+| I2C0 SDA | 9 | 共用：MPU6050 + TOF400F + BN-880磁力计 |
+| I2C0 SCL | 8 | 共用：MPU6050 + TOF400F + BN-880磁力计 |
 | UART1 RX | 44 | PV3901L1 光流（模块仅有 TX） |
 | YAW_MODE | 15 | 光流偏航模式选择 |
 | M0 (FR, CCW) | 14 | 前右电机, LEDC PWM |
 | M1 (FL, CW) | 11 | 前左电机, LEDC PWM |
 | M2 (RL, CCW) | 13 | 后左电机, LEDC PWM |
 | M3 (RR, CW) | 12 | 后右电机, LEDC PWM |
+| 机械爪舵机 | 10 | MG995, LEDC 50Hz（TIMER_1/CH4） |
 | RGB LED | 48 | WS2812 状态指示 |
 
 ## 飞行模式

@@ -1,4 +1,5 @@
 #include "commander.h"
+#include "servo_grip.h"   /* SERVO_GRIP_OPEN/CLOSE_DEG 预设角 */
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -24,8 +25,10 @@ static setpoint_t g_sp = {
     .flow_kx      = 1.0f,   /* 陀螺补偿（米制域，无量纲标称 ±1；2026-07-04 tilt
                              * 测试 +1 摆幅明显小于 −1，符号为正） */
     .flow_ky      = 1.0f,
-    .flow_scale   = 0.00244f, /* 米制换算 rad/count（PMW3901 系理论值，待试飞标定） */
+    .flow_scale   = 0.00244f, /* 米制换算 rad/count（PMW3901 系理论值；2026-07-04 手持
+                               * 1m 推移标定确认 <10cm 复现，2026-07-05 试飞验证） */
     .flow_calib   = false,
+    .grip_angle   = SERVO_GRIP_OPEN_DEG,   /* 上电张开，与 servo_grip_init 一致 */
     .pending_cmd  = CMD_NONE,
 };
 
@@ -172,6 +175,21 @@ void commander_parse(const char *json, int len)
             if (cJSON_IsNumber(sc))
                 sp.flow_scale = clamp((float)sc->valuedouble, 0.0002f, 0.05f);
         }
+        else if (strcmp(item->valuestring, "grip") == 0) {
+            /* 机械爪（非阻塞，经 setpoint 传主循环；任意模式可用——飞行
+             * 抓取本来就要在空中闭爪）：angle 直接给角度（前端调试滑条），
+             * action "open"/"close" 用 servo_grip.h 预设角（飞控流程语义） */
+            cJSON *ang = cJSON_GetObjectItem(root, "angle");
+            cJSON *act = cJSON_GetObjectItem(root, "action");
+            if (cJSON_IsNumber(ang))
+                sp.grip_angle = clamp((float)ang->valuedouble, 0.0f, 180.0f);
+            else if (cJSON_IsString(act)) {
+                if (strcmp(act->valuestring, "open") == 0)
+                    sp.grip_angle = SERVO_GRIP_OPEN_DEG;
+                else if (strcmp(act->valuestring, "close") == 0)
+                    sp.grip_angle = SERVO_GRIP_CLOSE_DEG;
+            }
+        }
         else if (strcmp(item->valuestring, "flow_calib") == 0) {
             /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），
              * 手持移动飞机即可安全标定 flow_scale，无需拆桨解锁 */
@@ -231,6 +249,8 @@ void commander_reset_setpoint(void)
     safe.flow_kx = g_sp.flow_kx;  /* 保留光流标定值，不被失控复位清掉 */
     safe.flow_ky = g_sp.flow_ky;
     safe.flow_scale = g_sp.flow_scale;
+    safe.grip_angle = g_sp.grip_angle;  /* 保留爪状态：断连复位若强制张开，
+                                         * 会把已抓取的目标当场掉落 */
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");

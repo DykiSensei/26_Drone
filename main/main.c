@@ -14,6 +14,7 @@
 #include "http_server.h"
 #include "commander.h"
 #include "motor.h"
+#include "servo_grip.h"
 #include "attitude.h"
 #include "pid.h"
 #include "mixer.h"
@@ -158,6 +159,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"alt\":{\"target\":%.2f,\"vz\":%.2f},"
         "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
         "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
+        "\"grip\":%.1f,"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
@@ -171,6 +173,7 @@ static void build_telemetry(char *buf, size_t sz,
         pos_state, g_position.target_x, g_position.target_y,
         g_flow_hold.vx_est, g_flow_hold.vy_est,
         mag->x, mag->y, mag->z, hdg, mag->valid ? 1 : 0,
+        servo_grip_get_angle(),
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -213,6 +216,11 @@ void app_main(void)
     /* --- Motors --- */
     if (motor_init() != 0) {
         printf("FATAL: motor init failed\n"); return;
+    }
+
+    /* --- 机械爪舵机（非致命：失败仅无抓取功能，不影响飞行） --- */
+    if (servo_grip_init() != 0) {
+        ESP_LOGW(TAG, "servo grip init failed — continuing without gripper");
     }
 
     /* --- Attitude estimator --- */
@@ -576,6 +584,11 @@ void app_main(void)
         }
 
         g_prev_mode = sp->mode;
+
+        /* 机械爪：任意模式生效（DISARMED 台架调试 / 飞行中抓取），目标角
+         * 经 setpoint 下发，限速逼近防电流尖峰与反扭矩 */
+        servo_grip_set_angle(sp->grip_angle);
+        servo_grip_update(dt);
 
         /* 遥测 20Hz（每 5 拍一次）+ http_server 内部异步发送：全速 100Hz
          * 同步发送在 WiFi 拥塞时会阻塞控制循环 —— 电机保持旧 PWM，等效失控 */
