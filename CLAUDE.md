@@ -54,7 +54,7 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 
 - ESP-IDF environment: `C:/Espressif/frameworks/esp-idf-v5.5.4/`
 - Target: `esp32s3`
-- Flash port: `COM14`
+- Flash port: **use the board's native-USB port** (enumerates as "USB 串行设备", COM12 as of 2026-07-05; number shifts across replugs — check `Get-CimInstance Win32_PnPEntity`). ⚠️ The CH343 port ("USB-Enhanced-SERIAL CH343", COM13) **cannot flash**: it bridges UART0 (GPIO43/44) and GPIO44 is permanently driven by the optical-flow module's TX, jamming PC→chip data ("Download mode detected, but no sync reply"). Console logs appear on both ports (UART0 primary + USB-Serial-JTAG secondary).
 
 On this machine, `idf.py` is not on PATH. **Must run from PowerShell/cmd — idf.py rejects MSYS/bash environments.** Invoke via the IDF Python env + full idf.py path:
 
