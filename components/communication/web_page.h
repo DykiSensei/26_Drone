@@ -146,6 +146,16 @@
 "<input type=\"range\" id=\"grip-slider\" min=\"0\" max=\"90\" step=\"1\" value=\"0\" style=\"width:100%\"></div>\n" \
 "</div>\n" \
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
+"<h3>抓取任务</h3>\n" \
+"<div class=\"data-row\"><span>状态 / P4链路</span><span><span id=\"grab-st\">待机</span> / <span id=\"grab-p4\">离线</span></span></div>\n" \
+"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">抓取触发高度 (TOF读数): <span id=\"grab-tof-val\">0.20</span> m</label><br>\n" \
+"<input type=\"range\" id=\"grab-tof\" min=\"0.10\" max=\"0.40\" step=\"0.01\" value=\"0.20\" style=\"width:100%\"></div>\n" \
+"<div style=\"display:flex;gap:6px;margin-top:4px\">\n" \
+"<button style=\"flex:1;background:#238636;border-color:#2ea043;color:#fff\" onclick=\"grabStart()\" ontouchstart=\"event.preventDefault();grabStart()\">测试抓取</button>\n" \
+"<button style=\"flex:1\" class=\"btn-danger\" onclick=\"grabAbort()\" ontouchstart=\"event.preventDefault();grabAbort()\">中止</button>\n" \
+"</div>\n" \
+"</div>\n" \
+"<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
 "<h3>Motor Trim <span style=\"font-size:10px;color:#8b949e\">(补偿硬件差异)</span></h3>\n" \
 "<div style=\"display:flex;justify-content:space-between;gap:4px;margin-top:4px\">\n" \
 "<div style=\"text-align:center\"><div style=\"font-size:11px;color:#8b949e\">M1(FR)</div><div><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(0,0.01)\">+</button><span id=\"mtrim-0\" style=\"font-family:monospace;font-size:12px;margin:0 4px\">0.00</span><button style=\"padding:2px 8px;font-size:11px\" onclick=\"adjTrim(0,-0.01)\">-</button></div><button style=\"margin-top:2px;font-size:10px;padding:2px 6px;background:#3a1c1c;border-color:#f85149;color:#f85149\" onclick=\"calibMotor(0)\">校准</button></div>\n" \
@@ -201,6 +211,7 @@
 "if(d.trim){$('trim-roll').textContent=d.trim.roll.toFixed(1)+'°';$('trim-pitch').textContent=d.trim.pitch.toFixed(1)+'°'}\n" \
 "if(d.mtrim){for(let i=0;i<4;i++){let e=$('mtrim-'+i);if(e)e.textContent=d.mtrim[i].toFixed(2)}}\n" \
 "if(d.grip!=null){$('grip-angle').textContent=d.grip.toFixed(0)+'\\u00b0'}\n" \
+"if(d.grab){var gn=['待机','对准','下降','抓取','上升'],ge=$('grab-st');ge.textContent=gn[d.grab.st]||'?';ge.style.color=d.grab.st?'#d2991d':'#8b949e';var pe=$('grab-p4');pe.textContent=d.grab.p4?'在线':'离线';pe.style.color=d.grab.p4?'#7ee787':'#8b949e'}\n" \
 "}catch(ex){}\n" \
 "}\n" \
 "}connect();\n" \
@@ -212,6 +223,8 @@
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
 "function gripAction(a){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',action:a}));showToast(a==='open'?'张开机械爪':'闭合机械爪')}\n" \
 "function sendGripAngle(v){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',angle:v}))}\n" \
+"function grabStart(){if(!connected)return;if(confirm('测试抓取任务?\\n\\n假设当前位置精确, 直接下降到触发高度闭爪, 然后返回当前高度。\\n确保正下方有目标, 且飞机处于定高/定点模式!')){ws.send(JSON.stringify({cmd:'grab_start',test:1}));showToast('测试抓取启动',true)}}\n" \
+"function grabAbort(){if(!connected)return;ws.send(JSON.stringify({cmd:'grab_abort'}));showToast('抓取任务中止',true)}\n" \
 "var flowCalib=0;\n" \
 "function setFlowCalibUI(){var b=$('fc-btn');b.textContent=flowCalib?'ON':'OFF';b.style.background=flowCalib?'#238636':'';b.style.color=flowCalib?'#fff':''}\n" \
 "function toggleFlowCalib(){if(!connected)return;flowCalib=flowCalib?0:1;ws.send(JSON.stringify({cmd:'flow_calib',on:flowCalib}));setFlowCalibUI();showToast(flowCalib?'标定模式开启: 保持锁定, 手持移动飞机, 看 X(m)':'标定模式关闭',!flowCalib)}\n" \
@@ -245,6 +258,7 @@
 "$('takeoff-h').addEventListener('input',function(){$('takeoff-h-val').textContent=parseFloat(this.value).toFixed(1)});\n" \
 "$('takeoff-t').addEventListener('input',function(){$('takeoff-t-val').textContent=parseFloat(this.value).toFixed(2)});\n" \
 "$('grip-slider').addEventListener('input',function(){var v=parseFloat(this.value);$('grip-slider-val').textContent=v.toFixed(0);sendGripAngle(v)});\n" \
+"$('grab-tof').addEventListener('input',function(){var v=parseFloat(this.value);$('grab-tof-val').textContent=v.toFixed(2);if(connected&&ws)ws.send(JSON.stringify({cmd:'grab_cfg',tof:v}))});\n" \
 "function doTakeoff(){if(!connected)return;var h=parseFloat($('takeoff-h').value);var t=parseFloat($('takeoff-t').value);ws.send(JSON.stringify({cmd:'takeoff',height:h,base_throttle:t}));throttle=t;$('throttle-slider').value=t;$('throttle-val').textContent=(t*100).toFixed(0)+'%';setMode('alt_hold');showToast('起飞: '+h.toFixed(1)+'m')}\n" \
  \
 "</script>\n" \

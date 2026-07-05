@@ -12,6 +12,7 @@
 #include "bn880_mag.h"
 #include "wifi_ap.h"
 #include "http_server.h"
+#include "p4link.h"
 #include "commander.h"
 #include "motor.h"
 #include "servo_grip.h"
@@ -21,6 +22,7 @@
 #include "altitude.h"
 #include "flow_hold.h"
 #include "position.h"
+#include "grab_mission.h"
 
 static const char *TAG = "main";
 
@@ -45,6 +47,9 @@ static bool  g_capture_trim = false;
 static bool  g_move_to_pending = false;   /* CMD_MOVE_TO 延迟到主循环处理 */
 static bool  g_move_stop_pending = false; /* CMD_MOVE_STOP 延迟到主循环处理 */
 static bool  g_takeoff_pending = false;   /* CMD_TAKEOFF 延迟到主循环处理 */
+static bool  g_grab_start_pending = false; /* CMD_GRAB_START 延迟到主循环处理 */
+static bool  g_grab_abort_pending = false; /* CMD_GRAB_ABORT 延迟到主循环处理 */
+static bool  g_grab_test_req = false;      /* grab_start 的 test 参数快照 */
 static bool  g_position_lock_pending = false;  /* takeoff 期间延迟启动位置环：等飞机
                                                 * 稳定在目标高度后再锁定当前点，避免
                                                 * 上升阶段机身倾斜让光流积分带噪声 →
@@ -53,6 +58,7 @@ static bool  g_position_lock_pending = false;  /* takeoff 期间延迟启动位�
 static altitude_ctrl_t g_alt;            /* 定高 PID 控制器 */
 static flow_hold_t     g_flow_hold;       /* 光流速度保持控制器 */
 static position_ctrl_t g_position;        /* 光流位置控制器 (P4 move_to) */
+static grab_mission_t  g_grab;            /* 抓取任务状态机 */
 static float           g_alt_out = 0.0f;  /* 定高 PID 输出（用于遥测） */
 static float           g_ax_filt = 0.0f;  /* accel X EMA for flow predict */
 static float           g_ay_filt = 0.0f;  /* accel Y EMA for flow predict */
@@ -124,6 +130,14 @@ static void execute_pending_cmd(const setpoint_t *sp)
         ESP_LOGW(TAG, "takeoff: height=%.2f m, throttle=%.2f",
                  sp->takeoff_height, sp->takeoff_throttle);
         break;
+    case CMD_GRAB_START:
+        g_grab_start_pending = true;
+        g_grab_test_req = sp->grab_test;
+        ESP_LOGW(TAG, "grab_start (%s)", sp->grab_test ? "测试模式" : "P4 模式");
+        break;
+    case CMD_GRAB_ABORT:
+        g_grab_abort_pending = true;
+        break;
     default:
         break;
     }
@@ -160,6 +174,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
         "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
         "\"grip\":%.1f,"
+        "\"grab\":{\"st\":%d,\"p4\":%d},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
@@ -174,6 +189,7 @@ static void build_telemetry(char *buf, size_t sz,
         g_flow_hold.vx_est, g_flow_hold.vy_est,
         mag->x, mag->y, mag->z, hdg, mag->valid ? 1 : 0,
         servo_grip_get_angle(),
+        (int)g_grab.state, p4link_alive() ? 1 : 0,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -223,6 +239,11 @@ void app_main(void)
         ESP_LOGW(TAG, "servo grip init failed — continuing without gripper");
     }
 
+    /* --- P4 视觉链路（非致命：无 P4 时驱动静默待机, alive 恒 false） --- */
+    if (p4link_init() != 0) {
+        ESP_LOGW(TAG, "p4link init failed — continuing without P4 link");
+    }
+
     /* --- Attitude estimator --- */
     attitude_init();
 
@@ -233,6 +254,7 @@ void app_main(void)
     altitude_init(&g_alt);
     flow_hold_init(&g_flow_hold);
     position_init(&g_position);
+    grab_mission_init(&g_grab);
 
     /* --- WiFi AP --- */
     if (wifi_ap_init() != 0) {
@@ -254,6 +276,7 @@ void app_main(void)
     mpu6050_data_t imu_new;
     int             imu_fail = 0;
     int             telem_div = 0;
+    int             p4_div = 0;
     uint16_t        tof_mm = 0;
     pv3901l1_data_t flow = {0};   /* 必须清零：首帧光流到达前 get_data 不写入，
                                    * 否则 qual/积分读到栈上垃圾值 */
@@ -417,6 +440,45 @@ void app_main(void)
         if (sp->pending_cmd != CMD_NONE) {
             execute_pending_cmd(sp);
             commander_clear_pending_cmd();
+        }
+
+        /* ---- 抓取任务：启动/中止 + P4 视觉测量门控 + 状态机推进 ---- */
+        if (g_grab_start_pending) {
+            g_grab_start_pending = false;
+            grab_mission_start(&g_grab, g_grab_test_req, p4link_alive(),
+                               sp, &g_alt, tof_mm);
+        }
+        if (g_grab_abort_pending) {
+            g_grab_abort_pending = false;
+            grab_mission_abort(&g_grab, &g_alt, tof_mm, "前端中止");
+        }
+        {
+            /* P4 测量安全门（协议四道门 + 准静态门，默认值见 p4link_protocol.h）：
+             * 限幅 ±1m → track=LOCKED → conf≥50 → ts_echo 有效且陈旧度 ≤200ms
+             * → |倾角| ≤5°。全过才交给状态机（ALIGN 阶段消费；测试模式忽略） */
+            grab_meas_t gmeas = {0};
+            p4link_target_t p4t;
+            if (p4link_take_target(&p4t, NULL)) {
+                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                uint32_t age_ms = now_ms - p4t.ts_echo_ms;
+                float dx = (float)p4t.dx_mm, dy = (float)p4t.dy_mm;
+                if (dx >  P4LINK_OFFSET_CLAMP_MM) dx =  P4LINK_OFFSET_CLAMP_MM;
+                if (dx < -P4LINK_OFFSET_CLAMP_MM) dx = -P4LINK_OFFSET_CLAMP_MM;
+                if (dy >  P4LINK_OFFSET_CLAMP_MM) dy =  P4LINK_OFFSET_CLAMP_MM;
+                if (dy < -P4LINK_OFFSET_CLAMP_MM) dy = -P4LINK_OFFSET_CLAMP_MM;
+                if (p4t.track == P4LINK_TRACK_LOCKED
+                    && p4t.conf >= P4LINK_CONF_MIN
+                    && p4t.ts_echo_ms != 0
+                    && age_ms <= P4LINK_AGE_MAX_MS
+                    && fabsf(roll)  * 100.0f <= (float)P4LINK_TILT_GATE_CDEG
+                    && fabsf(pitch) * 100.0f <= (float)P4LINK_TILT_GATE_CDEG) {
+                    gmeas.dx_m = dx * 0.001f;
+                    gmeas.dy_m = dy * 0.001f;
+                    gmeas.valid = true;
+                }
+            }
+            grab_mission_update(&g_grab, sp, &g_alt, &g_position, &g_flow_hold,
+                                &gmeas, tof_mm, dt);
         }
         if (sp->mode == MODE_DISARMED && sp->motor_active) {
             /* 台架电机测试：只在 DISARMED（锁定）下生效，飞行模式下 motor
@@ -589,6 +651,30 @@ void app_main(void)
          * 经 setpoint 下发，限速逼近防电流尖峰与反扭矩 */
         servo_grip_set_angle(sp->grip_angle);
         servo_grip_update(dt);
+
+        /* P4 链路 MSG_STATE 广播 50Hz（每 2 拍；非阻塞，见 p4link_send_state） */
+        if (++p4_div >= 2) {
+            p4_div = 0;
+            uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000);
+            p4link_state_t st = {
+                .ts_ms      = ts ? ts : 1,   /* 协议约定 ts 恒 ≥1（0 是 P4 的
+                                              * "无状态基准"哨兵值） */
+                .roll_cdeg  = (int16_t)(roll  * 100.0f),
+                .pitch_cdeg = (int16_t)(pitch * 100.0f),
+                .yaw_cdeg   = (int16_t)(yaw   * 100.0f),
+                .height_mm  = tof_mm,
+                .vz_mms     = (int16_t)(g_alt.vz * 1000.0f),
+                .flow_qual  = (uint8_t)flow.qual,
+                .mode       = (uint8_t)sp->mode,
+                .grip_deg   = (uint8_t)servo_grip_get_angle(),
+                .flags      = (uint8_t)(
+                      (sp->mode != MODE_DISARMED ? P4LINK_F_ARMED : 0)
+                    | (g_flow_hold.quality_gain >= 0.05f ? P4LINK_F_FLOW_TRUST : 0)
+                    | ((g_position.active && g_position.hold) ? P4LINK_F_POS_HOLD : 0)
+                    | ((tof_mm >= 40 && tof_mm <= 4000) ? P4LINK_F_TOF_VALID : 0)),
+            };
+            p4link_send_state(&st);
+        }
 
         /* 遥测 20Hz（每 5 拍一次）+ http_server 内部异步发送：全速 100Hz
          * 同步发送在 WiFi 拥塞时会阻塞控制循环 —— 电机保持旧 PWM，等效失控 */

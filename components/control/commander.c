@@ -29,6 +29,8 @@ static setpoint_t g_sp = {
                                * 1m 推移标定确认 <10cm 复现，2026-07-05 试飞验证） */
     .flow_calib   = false,
     .grip_angle   = SERVO_GRIP_OPEN_DEG,   /* 上电张开，与 servo_grip_init 一致 */
+    .grab_tof_m   = 0.20f,   /* TOF 落地读数 ≈0.20m（安装高度），前端可调 */
+    .grab_test    = false,
     .pending_cmd  = CMD_NONE,
 };
 
@@ -191,6 +193,23 @@ void commander_parse(const char *json, int len)
                     sp.grip_angle = SERVO_GRIP_CLOSE_DEG;
             }
         }
+        else if (strcmp(item->valuestring, "grab_start") == 0) {
+            /* 启动抓取任务：test=1 无 P4 测试流程（跳过视觉对准）。
+             * 前置校验（模式/高度/爪状态/P4 存活）在主循环 grab_mission_start */
+            cJSON *t = cJSON_GetObjectItem(root, "test");
+            sp.grab_test = (cJSON_IsNumber(t) && t->valuedouble != 0)
+                        || cJSON_IsTrue(t);
+            sp.pending_cmd = CMD_GRAB_START;
+        }
+        else if (strcmp(item->valuestring, "grab_abort") == 0) {
+            sp.pending_cmd = CMD_GRAB_ABORT;
+        }
+        else if (strcmp(item->valuestring, "grab_cfg") == 0) {
+            /* 抓取参数调试（非阻塞经 setpoint）：tof = 触发闭爪的 TOF 读数 */
+            cJSON *gt = cJSON_GetObjectItem(root, "tof");
+            if (cJSON_IsNumber(gt))
+                sp.grab_tof_m = clamp((float)gt->valuedouble, 0.10f, 0.50f);
+        }
         else if (strcmp(item->valuestring, "flow_calib") == 0) {
             /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），
              * 手持移动飞机即可安全标定 flow_scale，无需拆桨解锁 */
@@ -252,6 +271,7 @@ void commander_reset_setpoint(void)
     safe.flow_scale = g_sp.flow_scale;
     safe.grip_angle = g_sp.grip_angle;  /* 保留爪状态：断连复位若强制张开，
                                          * 会把已抓取的目标当场掉落 */
+    safe.grab_tof_m = g_sp.grab_tof_m;  /* 保留抓取高度调试值 */
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");
@@ -282,4 +302,9 @@ void commander_set_cmd_callback(commander_cmd_cb_t cb)
 void commander_clear_pending_cmd(void)
 {
     g_sp.pending_cmd = CMD_NONE;
+}
+
+void commander_set_grip(float deg)
+{
+    g_sp.grip_angle = clamp(deg, 0.0f, SERVO_GRIP_MAX_DEG);
 }

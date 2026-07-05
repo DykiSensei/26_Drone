@@ -27,6 +27,8 @@ typedef enum {
     CMD_MOVE_TO,          /* Move to relative position offset (P4) */
     CMD_MOVE_STOP,        /* Stop all horizontal movement */
     CMD_TAKEOFF,          /* Auto takeoff to specified height */
+    CMD_GRAB_START,       /* 启动抓取任务 (grab_test 区分测试/P4 正式流程) */
+    CMD_GRAB_ABORT,       /* 中止抓取任务 */
 } commander_cmd_t;
 
 typedef struct {
@@ -51,8 +53,13 @@ typedef struct {
                              * running (motors stay stopped) so flow_scale can be
                              * calibrated by hand-carrying the drone — no arming,
                              * props stay on. Cleared on safety reset. */
-    float grip_angle;       /* 机械爪目标角 0–180°（任意模式生效；失联复位时保留，
+    float grip_angle;       /* 机械爪目标角 0–90°（任意模式生效；失联复位时保留，
                              * 防止断连瞬间松爪掉落已抓取的目标） */
+    float grab_tof_m;       /* 抓取触发高度: TOF 读数低于此即闭爪（TOF 离地安装
+                             * 高度 ≈0.20m，默认 0.20；前端 grab_cfg 滑条调试；
+                             * 失联复位保留） */
+    bool  grab_test;        /* CMD_GRAB_START 参数: true=无 P4 测试流程
+                             * (跳过视觉对准, 假设当前位置精确) */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 
@@ -102,6 +109,13 @@ void commander_set_cmd_callback(commander_cmd_cb_t cb);
  * @brief Clear the pending command after main loop has executed it
  */
 void commander_clear_pending_cmd(void);
+
+/**
+ * @brief 程序侧设置机械爪目标角（抓取任务闭爪用，等效前端 grip 命令）。
+ *        sp->grip_angle 仍是爪角唯一真源。与 commander_parse 的整结构体
+ *        赋值存在窄竞态（丢写概率极低）——调用方在关键阶段每拍重写即自愈。
+ */
+void commander_set_grip(float deg);
 
 #ifdef __cplusplus
 }
