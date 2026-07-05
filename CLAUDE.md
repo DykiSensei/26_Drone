@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-S3 quadcopter flight controller based on ESP-IDF 5.5.4. WiFi AP + WebSocket for remote control and telemetry. References Crazyflie/esp-drone architecture.
 
-Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calibration procedures for humans are in `README.md`.
+Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calibration procedures for humans are in `README.md`. The S3↔P4 serial protocol spec for the P4-side team is `P4LINK_PROTOCOL.md` (authoritative byte-level definition: `components/communication/p4link_protocol.h`).
 
 ## Current Status & TODO (last updated 2026-07-05)
 
@@ -37,6 +37,8 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 5. **BN-880 magnetometer driver + frontend cleanup (2026-07-05)** — `drivers/bn880_mag.c` probes three chip variants (QMC5883L@0x0D, HMC5883L@0x1E, IST8310@0x0E; HMC data order is X,Z,Y big-endian vs QMC/IST X,Y,Z little-endian; IST is single-measurement mode, re-triggered each read). On total probe failure it scans the whole bus and logs every ACKing address (only 0x29/0x68 = compass unpowered/not on bus). Gauss output in **module axes — no body-frame alignment or hard/soft-iron calibration yet** (that's the Mahony 9-axis step). ⚠️ **Hardware unresolved & PARKED (user decision 2026-07-05)**: compass never ACKed (vendor says "QMC5883"); flight test showed yaw nearly constant → drift is not yaw-induced → mag priority dropped. When resumed: flash latest firmware via the native-USB port, read the boot-log bus scan — unknown address = new variant to support (QMC5883P is 0x2C); only 0x29/0x68 = module-side hardware fault (check power LED, feed VCC 5V, verify silk-vs-cable pin order, continuity SDA→GPIO9/SCL→GPIO8). Init is non-fatal (`mag.ok=0` in telemetry when absent); read at 20Hz in the telemetry block. Web UI simplified the same day: removed IMU-raw/PID panels, flow debug rows (fps/raw/comp/corr/lock-target), GyroComp+FlowScale inputs (values are firmware defaults now; recalibrate via WS `flow_comp` command), dpad nudge buttons, battery placeholder; telemetry JSON trimmed to match (accel/gyro/pid/alt.out/flow debug fields dropped).
 
 6. **MG995 机械爪驱动 (2026-07-05, 台架标定完成)** — `drivers/servo_grip.c`: GPIO10, LEDC TIMER_1/CH4 @50Hz (电机占 TIMER_0/CH0-3), 500–2500µs↔0–180° (参数沿用用户已验证的 esp32s3-mg995-servo-web 库), 主循环 100Hz 限速逼近 120°/s (防电流尖峰+飞行反扭, 无独立任务)。**台架实测 2026-07-05: 0°=完全张开, 90°=完全闭合; ⚠️ >90° 齿条行程用尽、舵机空转打滑 — `SERVO_GRIP_MAX_DEG=90` 是驱动层硬限位 (clamp 在驱动内部, 任何上层都越不过), commander 侧同步钳位, 前端滑条 0–90**。机械爪兼作**起落架**: 地面停放/上电默认完全张开 (OPEN=0°, init 即输出)。WS `grip` 命令经 setpoint 非阻塞下发 (任意模式可用), 安全复位**保留**爪角度 (防断连掉落已抓目标), 遥测 `grip` 字段 + 前端调试面板。**待办**: ⚠️ 硬件接线必须独立 5V BEC (堵转 1A+, 共轨会在闭爪瞬间拉复位主控); 抓着目标时爪=起落架不可用, 降落策略待定 (先松爪投放/落在目标上)。最终目标 (S3+P4 视觉伺服抓取) 见 DESIGN.md Phase 6。
+
+7. **S3↔P4 串口协议 v1 定稿 (2026-07-05, ⚠️ 纯理论设计 — P4 硬件未就绪, 不可实测)** — 唯一权威定义 `communication/p4link_protocol.h` (P4 工程持同一份拷贝), 设计文档 DESIGN.md §3.10, **P4 侧开发独立规格 `P4LINK_PROTOCOL.md`** (字节表/解析器状态机/P4 实现清单/联调步骤, 自包含无需读飞控代码)。要点: P4=纯传感器永不指挥飞行 / UART2 TX=GPIO17 RX=GPIO18 @115200 (引脚已预留) / 帧 `AA 55 type len payload crc16` (CCITT-FALSE, 两侧必须用头文件里的参考实现) / 仅两条消息: MSG_STATE S3→P4 50Hz (姿态/高度/模式/爪角), MSG_TARGET P4→S3 (机体系偏差 dx/dy 同 move_to 约定 + conf + track, 未锁定时 ≥10Hz 心跳) / ts_echo 回传免时钟同步测陈旧度 / S3 四道安全门: 限幅 ±1m, conf≥50, 陈旧度 ≤200ms, 链路超时 500ms→中止抓取回悬停 (绝不 DISARM) + 准静态门 |tilt|>5° 不采信。**下一步**: p4link S3 侧驱动 (仿 flow_rx 任务模式), P4 就绪后按 §3.10 联调清单实测。
 
 **Sensor roadmap** (BN-880 GPS+magnetometer module purchased, plan agreed 2026-07):
 1. ✅ Metric flow + dt fix — bench-calibrated 2026-07-04, **flight-validated 2026-07-05** (stable attitude, ~30cm drift)
@@ -96,6 +98,8 @@ $env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 | M2 (RL, CCW) | 13 | LEDC PWM |
 | M3 (RR, CW) | 12 | LEDC PWM |
 | Grip servo | 10 | MG995 机械爪, LEDC 50Hz (TIMER_1/CH4; motors own TIMER_0/CH0-3 @400Hz) |
+| P4 link TX | 17 | **Reserved** — UART2 → P4 RX (protocol v1 designed 2026-07-05, not wired) |
+| P4 link RX | 18 | **Reserved** — UART2 ← P4 TX |
 | RGB LED | 48 | WS2812 status indicator |
 
 ## Directory Structure
@@ -201,6 +205,7 @@ All component headers are public (no `private_*.h`). Include patterns:
 - `wifi_ap.h` — `wifi_ap_init()`
 - `http_server.h` — `http_server_init()`, `http_server_set_command_cb()`, `http_server_set_disconnect_cb()`, `http_server_broadcast()`
 - `web_page.h` — embedded HTML/CSS/JS frontend (single `const char *`)
+- `p4link_protocol.h` — S3↔P4 串口协议 v1 唯一权威定义 (frame format, `p4link_state_t`/`p4link_target_t` packed structs, safety-gate defaults, CRC-16/CCITT-FALSE reference impl; P4 工程持同一份拷贝; **header-only, 尚无驱动实现**; 设计详见 DESIGN.md §3.10)
 
 ## Coding Conventions
 
