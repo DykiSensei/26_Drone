@@ -542,6 +542,8 @@ P4 负责（取曝光时刻最近的一帧状态）。
 │   │   ├── mpu6050.h / .c      # MPU6050 陀螺仪驱动 ✅
 │   │   ├── tof400f.h / .c      # TOF400F 激光测距驱动（VL53L1X 原生协议）✅
 │   │   ├── pv3901l1.h / .c     # PV3901L1 光流驱动 ✅
+│   │   ├── bn880_mag.h / .c    # BN-880 磁力计驱动（三芯片探测；硬件⏸️暂缓）✅
+│   │   ├── servo_grip.h / .c   # MG995 机械爪舵机（0°张开/90°闭合硬限位）✅
 │   │   └── motor.h / .c        # 电机 PWM 驱动 ✅
 │   ├── control/                # 飞行控制
 │   │   ├── CMakeLists.txt
@@ -549,11 +551,15 @@ P4 负责（取曝光时刻最近的一帧状态）。
 │   │   ├── pid.h / .c          # PID 控制器 ✅
 │   │   ├── mixer.h / .c        # X-quad 混控器 ✅
 │   │   ├── altitude.h / .c     # 定高 PID 控制器 ✅
-│   │   └── flow_hold.h / .c    # 光流速度保持控制器 ✅
+│   │   ├── flow_hold.h / .c    # 光流速度保持控制器 ✅
+│   │   ├── position.h / .c     # 位置控制器（move_to / 位置锁定）✅
+│   │   └── grab_mission.h / .c # 抓取任务状态机（⚠️ 实飞未测）✅
 │   ├── communication/          # 通信
 │   │   ├── CMakeLists.txt
 │   │   ├── wifi_ap.h / .c      # WiFi AP 模式 ✅
 │   │   ├── http_server.h / .c  # HTTP + WebSocket 服务器 ✅
+│   │   ├── p4link_protocol.h   # S3↔P4 协议唯一权威定义（P4 侧持同一拷贝）✅
+│   │   ├── p4link.h / .c       # S3 侧 P4 链路驱动（UART2 + 解析任务）✅
 │   │   └── web_page.h          # 嵌入式 Web 前端（HTML/CSS/JS）✅
 │   ├── estimation/             # 姿态估计
 │   │   ├── CMakeLists.txt

@@ -13,7 +13,7 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 **Flight-verified**: STABILIZE, ALT_HOLD (vz damping + takeoff target ramp), auto-takeoff, per-motor trim. **Metric flow pipeline flight-validated 2026-07-05**: attitude very stable, hover position drift ~30cm — and **yaw is nearly constant in flight**, so the drift is NOT lock-frame rotation (this finding deprioritized the magnetometer, see roadmap).
 
 **Current priority — shrink the ~30cm hover drift** (all-flow levers, no new hardware):
-1. Hover lower (~0.5m): flow quantization noise scales with height — 1 count = 0.12 m/s at 1m, half that at 0.5m. Cheapest first test.
+1. Hover lower (~0.5m) **as a diagnostic only**: flow quantization noise scales with height — 1 count = 0.12 m/s at 1m, half that at 0.5m. ⚠️ NOT the final answer: the operating cruise altitude is **~1.7m** (user-confirmed 2026-07-05, P4 vision needs it), where 1 count ≈ 0.2 m/s — high-altitude drift is ultimately absorbed by the P4 visual servo loop, not by flying lower.
 2. Raise position-loop gain: `POS_KP` 1.5 → 2.0–2.5 in `position.c` (watch for lock-point oscillation), optionally velocity `FLOW_KP` 8 → 10–12 in `flow_hold.c`.
 3. Better floor texture / lighting raises qual → stronger flow correction.
 
@@ -111,8 +111,8 @@ $env:IDF_PATH = "C:\Espressif\frameworks\esp-idf-v5.5.4"
 ├── main/main.c                 # Entry point — init then 100Hz main loop
 ├── components/
 │   ├── drivers/                # Hardware drivers (I2C, MPU6050, TOF400F, PV3901L1, BN880 mag, Motor, Servo grip)
-│   ├── control/                # Flight control (commander, PID, mixer, altitude, flow_hold, position)
-│   ├── communication/          # WiFi AP + HTTP/WebSocket server + embedded web frontend
+│   ├── control/                # Flight control (commander, PID, mixer, altitude, flow_hold, position, grab_mission)
+│   ├── communication/          # WiFi AP + HTTP/WebSocket server + embedded web frontend + p4link (S3↔P4 UART)
 │   ├── estimation/             # Mahony AHRS attitude filter
 │   └── system/                 # Parameter storage (NVS) — planned
 └── build/                      # Build artifacts (git-ignored)
@@ -177,7 +177,7 @@ communication/ → (standalone, only depends on ESP-IDF)
 main/          → all components
 ```
 
-Control modules: `pid` (leaf), `mixer` (leaf), `commander` (leaf), `altitude` (depends on pid), `flow_hold` (depends on pid), `position` (depends on pid — uses PID internally for position→velocity conversion).
+Control modules: `pid` (leaf), `mixer` (leaf), `commander` (includes `servo_grip.h` for grip presets), `altitude` (depends on pid), `flow_hold` (depends on pid), `position` (depends on pid — uses PID internally for position→velocity conversion), `grab_mission` (orchestrates altitude/position/servo_grip/commander — the mission layer on top of all of them; P4 measurements arrive pre-gated from main.c so control never includes communication headers).
 
 ## C Headers
 
