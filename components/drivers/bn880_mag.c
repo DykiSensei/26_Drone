@@ -12,6 +12,7 @@ typedef enum {
     MAG_CHIP_NONE = 0,
     MAG_CHIP_QMC5883L,
     MAG_CHIP_HMC5883L,
+    MAG_CHIP_IST8310,
 } mag_chip_t;
 
 static mag_chip_t g_chip = MAG_CHIP_NONE;
@@ -26,6 +27,17 @@ static i2c_master_dev_handle_t g_dev;
 /* CTRL1: OSR[7:6]=00(512) RNG[5:4]=00(±2G) ODR[3:2]=01(50Hz) MODE[1:0]=01(连续) */
 #define QMC_CTRL1_CONFIG  0x05
 #define QMC_LSB_PER_GAUSS 12000.0f   /* ±2G 量程 */
+
+/* ---- IST8310 寄存器 ---- */
+#define IST_REG_WHOAMI    0x00  /* 恒为 0x10 */
+#define IST_REG_DATA      0x03  /* X,Y,Z 小端 s16 */
+#define IST_REG_CNTL1     0x0A  /* 0x01 = 单次测量（该芯片无连续模式） */
+#define IST_REG_CNTL2     0x0B  /* bit0 = 软复位 */
+#define IST_REG_AVGCNTL   0x41  /* 采样平均 */
+#define IST_REG_PDCNTL    0x42  /* 脉宽控制（手册推荐 0xC0） */
+#define IST_WHOAMI_VAL    0x10
+#define IST_LSB_PER_GAUSS 330.0f /* 0.3 µT/LSB 手册标称 —— 若前端模长明显
+                                  * 偏离地磁 0.3~0.7G 区间需修正此值 */
 
 /* ---- HMC5883L 寄存器 ---- */
 #define HMC_REG_CONFIG_A  0x00
@@ -94,6 +106,43 @@ static int try_hmc5883l(void)
     return 0;
 }
 
+static int try_ist8310(void)
+{
+    if (attach_device(IST8310_ADDR) != 0) return -1;
+
+    uint8_t id = 0;
+    if (read_regs(IST_REG_WHOAMI, &id, 1) != ESP_OK || id != IST_WHOAMI_VAL) {
+        ESP_LOGW(TAG, "0x0E 应答但 whoami=0x%02X (期望 0x10)", id);
+        i2c_master_bus_rm_device(g_dev);
+        return -1;
+    }
+    write_reg(IST_REG_CNTL2, 0x01);              /* 软复位 */
+    vTaskDelay(pdMS_TO_TICKS(10));
+    write_reg(IST_REG_AVGCNTL, 0x24);            /* XYZ 16 次平均 */
+    write_reg(IST_REG_PDCNTL, 0xC0);
+    write_reg(IST_REG_CNTL1, 0x01);              /* 触发首次单次测量 */
+    g_chip = MAG_CHIP_IST8310;
+    return 0;
+}
+
+/* 全总线扫描：三个已知地址都失败时的排查工具。
+ * 只有 0x29/0x68 → 罗盘没上电或没进总线（接线/焊点问题）；
+ * 出现其他地址 → 又一种未知罗盘变体，把地址报给开发者加驱动分支。 */
+static void scan_bus(void)
+{
+    int found = 0;
+    for (uint8_t a = 0x08; a <= 0x77; a++) {
+        if (i2c_master_probe(g_i2c0_bus, a, 10) == ESP_OK) {
+            const char *hint = (a == 0x68) ? " (MPU6050)"
+                             : (a == 0x29) ? " (TOF400F)"
+                             : " (未知设备 — 疑似罗盘变体)";
+            ESP_LOGW(TAG, "  I2C 应答: 0x%02X%s", a, hint);
+            found++;
+        }
+    }
+    ESP_LOGW(TAG, "总线扫描完成: %d 个设备。仅 0x29/0x68 = 罗盘未上电/未接入", found);
+}
+
 int bn880_mag_init(void)
 {
     if (try_qmc5883l() == 0) {
@@ -104,7 +153,12 @@ int bn880_mag_init(void)
         ESP_LOGI(TAG, "init ok: HMC5883L @0x1E, ±1.3Ga, 75Hz 连续");
         return 0;
     }
-    ESP_LOGW(TAG, "0x0D/0x1E 均未探测到磁力计 — 检查 BN-880 SDA/SCL/供电接线");
+    if (try_ist8310() == 0) {
+        ESP_LOGI(TAG, "init ok: IST8310 @0x0E, 单次测量模式（逐读触发）");
+        return 0;
+    }
+    ESP_LOGW(TAG, "0x0D/0x1E/0x0E 均未探测到磁力计，开始总线扫描:");
+    scan_bus();
     g_chip = MAG_CHIP_NONE;
     return -1;
 }
@@ -139,6 +193,21 @@ int bn880_mag_read(bn880_mag_data_t *out)
         out->valid = true;
         return 0;
     }
+    if (g_chip == MAG_CHIP_IST8310) {
+        /* 单次测量模式：读上一次结果，再触发下一次。20Hz 读取节奏下数据
+         * 最多 50ms 旧 —— 显示/融合都够用 */
+        uint8_t buf[6];
+        if (read_regs(IST_REG_DATA, buf, 6) != ESP_OK) return -1;
+        int16_t x = (int16_t)((buf[1] << 8) | buf[0]);   /* 小端 */
+        int16_t y = (int16_t)((buf[3] << 8) | buf[2]);
+        int16_t z = (int16_t)((buf[5] << 8) | buf[4]);
+        write_reg(IST_REG_CNTL1, 0x01);                  /* 触发下一次 */
+        out->x = (float)x / IST_LSB_PER_GAUSS;
+        out->y = (float)y / IST_LSB_PER_GAUSS;
+        out->z = (float)z / IST_LSB_PER_GAUSS;
+        out->valid = true;
+        return 0;
+    }
     return -1;
 }
 
@@ -147,6 +216,7 @@ const char *bn880_mag_chip_name(void)
     switch (g_chip) {
     case MAG_CHIP_QMC5883L: return "QMC5883L";
     case MAG_CHIP_HMC5883L: return "HMC5883L";
+    case MAG_CHIP_IST8310:  return "IST8310";
     default:                return "none";
     }
 }
