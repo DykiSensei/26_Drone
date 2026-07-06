@@ -27,7 +27,7 @@ static const char *TAG = "mpu6050";
 /* ---- State ---- */
 static i2c_master_dev_handle_t g_dev;
 static float g_gyro_offs[3];    /* rad/s */
-static float g_accel_offs[3];   /* m/s^2, z offset NOT removed */
+static float g_accel_offs[3];   /* m/s^2; z = 实测重力 − 标准重力 (2026-07-06 起校准并扣除) */
 
 static esp_err_t write_reg(uint8_t reg, uint8_t val)
 {
@@ -65,15 +65,18 @@ static void mpu6050_calibrate(void)
     g_gyro_offs[1] = (float)(sum_gy / samples) * GYRO_SCALE_2000 * DEG2RAD;
     g_gyro_offs[2] = (float)(sum_gz / samples) * GYRO_SCALE_2000 * DEG2RAD;
 
-    /* Accel: x/y ~0, z ~1g. Only zero x/y; keep z for gravity reference */
+    /* Accel: x/y ~0, z ~1g。x/y 直接归零；z 零偏 = 实测均值 − 标准重力。
+     * (2026-07-06 修复: 之前 z 零偏恒 0 —— MPU6050 z 零偏可达 ±0.1g,
+     * 原样灌进 az_up → vz 互补滤波稳态偏移 ≈ 0.5×零偏 → 起飞位置锁的
+     * |vz|<0.15 门永远过不去, 位置环从不介入, 悬停漂移无位置反馈) */
     g_accel_offs[0] = (float)(sum_ax / samples) * ACCEL_SCALE_16G * GRAVITY;
     g_accel_offs[1] = (float)(sum_ay / samples) * ACCEL_SCALE_16G * GRAVITY;
-    g_accel_offs[2] = 0.0f;
+    g_accel_offs[2] = (float)(sum_az / samples) * ACCEL_SCALE_16G * GRAVITY - GRAVITY;
 
     ESP_LOGI(TAG, "calib done: gyro_offs=(%.4f,%.4f,%.4f) rad/s, "
-             "accel_offs=(%.3f,%.3f) m/s^2",
+             "accel_offs=(%.3f,%.3f,%.3f) m/s^2",
              g_gyro_offs[0], g_gyro_offs[1], g_gyro_offs[2],
-             g_accel_offs[0], g_accel_offs[1]);
+             g_accel_offs[0], g_accel_offs[1], g_accel_offs[2]);
 }
 
 /* ---- Public API ---- */
@@ -143,7 +146,7 @@ int mpu6050_recalibrate_gyro(void)
 
     const int samples = 100;   /* 100 samples @ 100Hz = 1s */
     int64_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
-    int64_t sum_ax = 0, sum_ay = 0;
+    int64_t sum_ax = 0, sum_ay = 0, sum_az = 0;
     int valid = 0;
 
     for (int i = 0; i < samples; i++) {
@@ -151,6 +154,7 @@ int mpu6050_recalibrate_gyro(void)
         if (read_reg(REG_ACCEL_XOUT_H, buf, 14) == ESP_OK) {
             sum_ax += (int16_t)((buf[0]  << 8) | buf[1]);
             sum_ay += (int16_t)((buf[2]  << 8) | buf[3]);
+            sum_az += (int16_t)((buf[4]  << 8) | buf[5]);
             sum_gx += (int16_t)((buf[8]  << 8) | buf[9]);
             sum_gy += (int16_t)((buf[10] << 8) | buf[11]);
             sum_gz += (int16_t)((buf[12] << 8) | buf[13]);
@@ -173,10 +177,14 @@ int mpu6050_recalibrate_gyro(void)
      * 消除上电面与起飞面不一致导致的姿态偏差 */
     g_accel_offs[0] = (float)(sum_ax / valid) * ACCEL_SCALE_16G * GRAVITY;
     g_accel_offs[1] = (float)(sum_ay / valid) * ACCEL_SCALE_16G * GRAVITY;
+    g_accel_offs[2] = (float)(sum_az / valid) * ACCEL_SCALE_16G * GRAVITY - GRAVITY;
 
     ESP_LOGI(TAG, "recal done: gyro=(%.4f,%.4f,%.4f) rad/s, accel=(%.4f,%.4f) m/s^2",
              g_gyro_offs[0], g_gyro_offs[1], g_gyro_offs[2],
              g_accel_offs[0], g_accel_offs[1]);
+    /* Z 零偏单独用 WARN 打印 —— 这就是 Vz 常值偏移的直接证据:
+     * 该值 × 0.5 ≈ 修复前 Vz 的稳态假读数 (m/s) */
+    ESP_LOGW(TAG, "accel Z bias = %+.3f m/s^2 (已从 vz 通道扣除)", g_accel_offs[2]);
     return 0;
 }
 
@@ -201,7 +209,7 @@ int mpu6050_read(mpu6050_data_t *out)
 
     out->accel_x = (float)ax * ACCEL_SCALE_16G * GRAVITY - g_accel_offs[0];
     out->accel_y = (float)ay * ACCEL_SCALE_16G * GRAVITY - g_accel_offs[1];
-    out->accel_z = (float)az * ACCEL_SCALE_16G * GRAVITY;
+    out->accel_z = (float)az * ACCEL_SCALE_16G * GRAVITY - g_accel_offs[2];
     out->gyro_x  = (float)gx * GYRO_SCALE_2000 * DEG2RAD - g_gyro_offs[0];
     out->gyro_y  = (float)gy * GYRO_SCALE_2000 * DEG2RAD - g_gyro_offs[1];
     out->gyro_z  = (float)gz * GYRO_SCALE_2000 * DEG2RAD - g_gyro_offs[2];

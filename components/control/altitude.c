@@ -22,6 +22,10 @@
  * This is what prevents the takeoff overshoot/crash from a stepped target. */
 #define ALT_RAMP_RATE   0.30f
 
+/* az_up 直流跟踪时间常数：远慢于真实机动（加减速瞬态 <1s），刚好吸收
+ * 准静态的零偏/振动整流偏移。持续匀速升降时真实 az_up≈0，不受影响。 */
+#define AZ_DC_TAU_S     2.0f
+
 void altitude_init(altitude_ctrl_t *alt)
 {
     pid_init(&alt->pid, ALT_KP, ALT_KI, ALT_KD, ALT_OUT_LIMIT, ALT_INT_LIMIT);
@@ -31,6 +35,18 @@ void altitude_init(altitude_ctrl_t *alt)
     alt->prev_m = 0.0f;
     alt->vz = 0.0f;
     alt->last_change_us = 0;
+    alt->az_lp = 0.0f;
+    alt->az_lp_init = false;
+}
+
+void altitude_track_az(altitude_ctrl_t *alt, float az_up, float dt)
+{
+    if (!alt->az_lp_init) {
+        alt->az_lp = az_up;       /* 首样本锁存，跳过从 0 收敛的瞬态 */
+        alt->az_lp_init = true;
+        return;
+    }
+    alt->az_lp += (dt / AZ_DC_TAU_S) * (az_up - alt->az_lp);
 }
 
 void altitude_set_target(altitude_ctrl_t *alt, float final_m, float current_m)
@@ -66,8 +82,10 @@ float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float 
      *   - correct only on fresh TOF samples with the height difference
      *     (low-rate & noisy, but absolute — pulls the drift back).
      * The TOF noise is attenuated by VZ_FUSE_K instead of differentiated raw,
-     * so vz stays smooth without the lag of a heavy low-pass. */
-    alt->vz += az_up * dt;
+     * so vz stays smooth without the lag of a heavy low-pass.
+     * 只积分高通分量：扣掉 az_lp 直流（残余零偏 + 振动整流），否则
+     * 稳态偏移 ≈ 0.5×直流 直接卡死起飞位置锁的 |vz|<0.15 门。 */
+    alt->vz += (az_up - alt->az_lp) * dt;
     if (current_m != alt->prev_m) {
         int64_t now = esp_timer_get_time();
         float dt_meas = (alt->last_change_us == 0)
@@ -97,4 +115,6 @@ void altitude_reset(altitude_ctrl_t *alt)
     alt->prev_m = 0.0f;
     alt->vz = 0.0f;
     alt->last_change_us = 0;
+    /* az_lp 不清零：输入调理滤波器必须连续运行（DISARMED 时本函数每拍
+     * 被调，清了跟踪器就永远学不到零偏——flow_hold 同款教训 2026-07-04） */
 }

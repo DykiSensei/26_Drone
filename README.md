@@ -187,6 +187,7 @@ MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
 | All MAX/MIN 测电机没反应 | 电机测试仅在锁定模式生效 | 切回 DISARMED 再测（飞行模式下测试按钮被忽略） |
 | 校准按钮无反应 | 校准命令仅在锁定模式生效 | 切回 DISARMED 再校准 |
 | 定点悬停缓慢漂移 | flow_scale 未标定 | 固定高度移动 1m 对比遥测 X，按比例修正 FlowScale |
+| 起飞漂移大 / Pos State 一直 wait 不进 lock / 上升中 Vz 读负 | Vz 常值偏移卡死位置锁：accel-Z 零偏未校准 + 电机振动整流（2026-07-06 已修复） | 烧新固件后做一次陀螺仪校准，日志看 `accel Z bias`；悬停时 Vz 应围绕 0 波动、Pos State 进 lock。注意锁定态 Vz 恒显 0 是正常的（每拍复位） |
 | 切入 ALT_HOLD 立即跳高/掉高 | 切入瞬间高度估计错误 | 在 0.5–1m 高度切换；检查 TOF 读数 `tof` 是否合理（40–4000 mm） |
 | 飞机持续朝一个方向漂 | 水平校准未做或安装偏移大 | 重新执行 Gyro Calib + Level Trim |
 | 飞机起飞后旋转（自转） | 电机方向/螺旋桨错装 | 检查 CCW/CW 桨位 |

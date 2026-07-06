@@ -44,6 +44,8 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 
 9. **投放任务 + 标记投放点 (2026-07-06, 编译通过, ⚠️ 实飞未测)** — 主线方案落地 (用户认可: 永远先投放再降落, 垃圾负载投放永远安全)。`grab_mission` 扩展 GRAB_MISSION_GRAB/DROP 两种任务类型 + GOTO(5)/RELEASE(6) 状态: **就地投放** = 测试抓取镜像 (下降→TOF≤drop_tof_m 触发张爪→回升, 默认 0.30m 前端滑条 0.15–0.60); **返航投放** = 悬停筐上方按"标记投放点"存 flow 航位坐标 (需 qg≥0.05) → 抓取后 `drop_start ret=1` → GOTO 状态 move_to 返航 (到达判据: 距标记 <0.25m 且位置环 hold; 用户方向键干预后限速 1s 重发 move_to 自愈) → 下降张爪 → 回升。**标记仅同一解锁周期有效** — main.c 在两处 flow_hold_reset 旁联动 clear_mark (DISARMED 分支 + 低油门分支), 坐标系复位标记即失效。投放后爪=张开=起落架就绪可直接降落; ASCEND 仅抓取任务每拍重写闭合角, 投放任务不干预。前端: 投放点状态行 + 投放高度滑条 + 标记投放点/就地投放/返航投放三按钮; 遥测 `grab.mk`。**待办**: 实飞验证返航精度 (配大开口筐吸收 ~0.5m 航位误差); P4 上线后协议 v1.1 加 TRACK_BLOCKED (相机被挡=抓取成功信号)。
 
+10. **Vz 常值偏移修复 (2026-07-06, 编译通过, ⚠️ 实飞待验证)** — 实飞观察: 上升中 Vz 读负、起飞漂移大难以安全进悬停, 用户怀疑位置环从未介入 — 代码证实: accel-Z 零偏从未校准 (审计老项, MPU6050 规格 ±0.1g) → `az_up` 常值假加速度 → vz 互补滤波稳态偏移 ≈ **0.5×零偏** (K=0.2, TOF 10Hz) → 起飞位置锁的 |vz|<0.15 门永远不过, `g_position_lock_pending` 挂死, ps 停在 wait。修复两层: ① `mpu6050.c` 初始+重校准均计算 Z 零偏 (avg − 9.80665) 并在 read 扣除; `gyro_calib` 以 WARN 打印 **"accel Z bias"** (地面确认零偏大小的唯一入口 — **DISARMED 下遥测 Vz 恒 0 是代码行为**, altitude_reset 每拍清零, 手持竖动测不出任何东西); ② `altitude.c` 新增 az_up 直流跟踪器 (`altitude_track_az`, tau=2s, 主循环每拍**全模式**调用; `altitude_reset` 不清零 — flow_hold 同款"输入调理滤波器连续运行"规则), vz 只积分高通分量, 吸收静态校准治不了的**飞行中电机振动整流直流下移**。验证清单: 烧录→gyro_calib 看 Z bias 数值; 实飞悬停 Vz 围绕 0 波动、ps 进入 lock(2)。若爬升段漂移仍大 → 下一杆是 POS_KP/FLOW_KP (roadmap 既有项)。
+
 **Sensor roadmap** (BN-880 GPS+magnetometer module purchased, plan agreed 2026-07):
 1. ✅ Metric flow + dt fix — bench-calibrated 2026-07-04, **flight-validated 2026-07-05** (stable attitude, ~30cm drift)
 2. ⏸️ **Magnetometer — PARKED 2026-07-05**: driver complete (3-variant probe + bus-scan diagnostic) but the compass never ACKs on the bus (hardware fault suspected, see item 5 above for the resume checklist). Priority dropped because flight showed yaw nearly constant — the yaw-drift benefit doesn't apply; still needed later for heading hold / yaw-proof world-frame position / P4 multi-step maneuvers / GPS.
@@ -51,7 +53,7 @@ Full architecture, pinout, and design decisions are in `DESIGN.md`. Flight/calib
 
 **Open issues from the 2026-07-02 code audit** (roughly priority-ordered):
 - `setpoint_t` torn reads: main loop dereferences the live `g_sp` pointer many times per iteration — copy the struct once per loop under a small lock; `pending_cmd` is a single slot that can drop a command arriving between execute and clear — replace with a FreeRTOS queue
-- accel-Z bias never calibrated (`mpu6050.c` keeps z offset = 0, MPU6050 z bias can be ±0.1g) → biases `vz` → constant altitude-throttle offset. Fix: `g_accel_offs[2] = avg_z − GRAVITY` during calibration
+- ~~accel-Z bias never calibrated~~ — **fixed 2026-07-06** (see status item 10)
 - `altitude.c` detects fresh TOF samples via float equality (`current_m != prev_m`) — a perfectly steady reading stalls the vz correction; the TOF driver should export a fresh flag instead
 - No battery voltage ADC (frontend already parses a `battery` telemetry field that firmware never sends); no low-voltage failsafe — most common crash cause for hobby quads
 - No pre-arm checks on takeoff (attitude sane / TOF valid / flow alive)

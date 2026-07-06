@@ -335,6 +335,15 @@ void app_main(void)
                         dt);
         attitude_get_euler(&roll, &pitch, &yaw);
 
+        /* 世界系垂直加速度（扣重力，向上为正，小角度 cos 补偿）。
+         * 每拍计算并喂 az 直流跟踪器——跟踪器必须全模式连续运行：
+         * DISARMED 静置时学到残余零偏，飞行中缓慢吸收振动整流偏移，
+         * vz 只积分高通分量（否则 Vz 常值偏移卡死起飞位置锁）。 */
+        float az_cr = cosf(roll  * 0.0174532925f);
+        float az_cp = cosf(pitch * 0.0174532925f);
+        float az_up = imu.accel_z * az_cr * az_cp - 9.81f;
+        altitude_track_az(&g_alt, az_up, dt);
+
         /* 处理延迟的 move_to / move_stop 命令（需要 flow 数据） */
         const setpoint_t *sp = commander_get_setpoint();
 #if FLOW_ENABLED
@@ -579,11 +588,7 @@ void app_main(void)
             /* --- 高度环 PID --- */
             g_alt_out = 0.0f;
             if (alt_mode && tof_mm >= 40 && tof_mm <= 4000) {
-                /* 世界系垂直加速度（扣除重力，向上为正），用于 vz 互补滤波。
-                 * 小角度悬停用 cos 倾斜补偿近似垂直分量即可。 */
-                float cr = cosf(roll  * 0.0174532925f);
-                float cp = cosf(pitch * 0.0174532925f);
-                float az_up = imu.accel_z * cr * cp - 9.81f;
+                /* az_up 已在循环顶部每拍计算（直流跟踪器全模式运行） */
                 g_alt_out = altitude_update(&g_alt, tof_mm * 0.001f, az_up, dt);
 
 #if FLOW_ENABLED
