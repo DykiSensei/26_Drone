@@ -21,9 +21,12 @@ static const char *TAG = "servo_grip";
 #define GRIP_ANGLE_FULL   180.0f           /* 脉宽映射满量程（勿用于钳位） */
 
 /* 限速逼近速度：90° 行程约 0.75s。太快 = 电流尖峰 + 飞行中反扭矩 */
-#define GRIP_SPEED_DPS    120.0f
+#define GRIP_SPEED_DPS       120.0f
+/* 标定模式转速：慢速探索行程极限，超程打滑前来得及收手 */
+#define GRIP_SPEED_CALIB_DPS 45.0f
 
 static bool  g_initialized  = false;
+static bool  g_calib_mode   = false;   /* 标定模式：限位放开 0-180, 慢速 */
 static float g_angle_now    = SERVO_GRIP_OPEN_DEG;  /* 当前（限速后）输出角 */
 static float g_angle_target = SERVO_GRIP_OPEN_DEG;
 
@@ -38,11 +41,27 @@ static void grip_write(float deg)
 
 static float clamp_angle(float deg)
 {
-    if (deg < 0.0f) return 0.0f;
     /* 硬限位 90°：齿条行程极限，超过舵机空转打滑（2026-07-05 台架实测）。
-     * 这里是最后一道防线——无论 commander/前端/未来 P4 状态机发什么都钳住 */
-    if (deg > SERVO_GRIP_MAX_DEG) return SERVO_GRIP_MAX_DEG;
+     * 这里是最后一道防线——无论 commander/前端/未来 P4 状态机发什么都钳住。
+     * 标定模式例外：放开到物理全量程 0-180 以探索新爪体的开/合角。 */
+    float max = g_calib_mode ? GRIP_ANGLE_FULL : SERVO_GRIP_MAX_DEG;
+    if (deg < 0.0f) return 0.0f;
+    if (deg > max)  return max;
     return deg;
+}
+
+void servo_grip_set_calib_mode(bool on)
+{
+    if (on == g_calib_mode) return;
+    g_calib_mode = on;
+    if (on) {
+        ESP_LOGW(TAG, "标定模式开启: 限位放开 0-180°, 转速降至 %.0f°/s — "
+                 "缓慢小步移动, 超过齿条行程舵机会空转!", GRIP_SPEED_CALIB_DPS);
+    } else {
+        /* 退出即收回限位；超限的目标/当前角度慢速滑回合法区 */
+        if (g_angle_target > SERVO_GRIP_MAX_DEG) g_angle_target = SERVO_GRIP_MAX_DEG;
+        ESP_LOGW(TAG, "标定模式关闭: 恢复 0-%.0f° 硬限位", SERVO_GRIP_MAX_DEG);
+    }
 }
 
 int servo_grip_init(void)
@@ -104,7 +123,7 @@ void servo_grip_update(float dt)
     if (!g_initialized) return;
     float err = g_angle_target - g_angle_now;
     if (fabsf(err) < 0.01f) return;   /* 到位后不再重写占空比 */
-    float step = GRIP_SPEED_DPS * dt;
+    float step = (g_calib_mode ? GRIP_SPEED_CALIB_DPS : GRIP_SPEED_DPS) * dt;
     if (err >  step) err =  step;
     if (err < -step) err = -step;
     g_angle_now += err;

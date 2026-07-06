@@ -37,6 +37,16 @@ void servo_grip_close(void);
  */
 void servo_grip_update(float dt);
 
+/**
+ * @brief 舵机标定模式：开启后角度限位临时放开到 0–180°（探索新爪体的
+ *        开/合角），且转速降为 45°/s（慢速逼近，接近齿条行程极限时来得及
+ *        收手——超行程舵机会空转打滑）。关闭后恢复 SERVO_GRIP_MAX_DEG
+ *        硬限位，超限目标自动收回。**只允许 DISARMED 下开启**（main.c 门控:
+ *        每拍 set_calib_mode(mode==DISARMED && sp->grip_calib)，解锁即自动
+ *        退出）。标定出的角度回填本文件三个宏后重新编译。
+ */
+void servo_grip_set_calib_mode(bool on);
+
 /** @brief 当前（限速后）输出角度，遥测用 */
 float servo_grip_get_angle(void);
 

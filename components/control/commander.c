@@ -29,6 +29,7 @@ static setpoint_t g_sp = {
                                * 1m 推移标定确认 <10cm 复现，2026-07-05 试飞验证） */
     .flow_calib   = false,
     .grip_angle   = SERVO_GRIP_OPEN_DEG,   /* 上电张开，与 servo_grip_init 一致 */
+    .grip_calib   = false,
     .grab_tof_m   = 0.20f,   /* TOF 落地读数 ≈0.20m（安装高度），前端可调 */
     .grab_test    = false,
     .drop_tof_m   = 0.30f,   /* 投放张爪高度（筐沿以上），前端可调 */
@@ -186,8 +187,9 @@ void commander_parse(const char *json, int len)
             cJSON *ang = cJSON_GetObjectItem(root, "angle");
             cJSON *act = cJSON_GetObjectItem(root, "action");
             if (cJSON_IsNumber(ang))
-                sp.grip_angle = clamp((float)ang->valuedouble,
-                                      0.0f, SERVO_GRIP_MAX_DEG);
+                /* 标定模式下放开到 0-180 (驱动层同步放开; 退出标定自动收回) */
+                sp.grip_angle = clamp((float)ang->valuedouble, 0.0f,
+                                      sp.grip_calib ? 180.0f : SERVO_GRIP_MAX_DEG);
             else if (cJSON_IsString(act)) {
                 if (strcmp(act->valuestring, "open") == 0)
                     sp.grip_angle = SERVO_GRIP_OPEN_DEG;
@@ -225,6 +227,13 @@ void commander_parse(const char *json, int len)
             sp.drop_goto = (cJSON_IsNumber(rt) && rt->valuedouble != 0)
                         || cJSON_IsTrue(rt);
             sp.pending_cmd = CMD_DROP_START;
+        }
+        else if (strcmp(item->valuestring, "grip_calib") == 0) {
+            /* 舵机标定模式开关: 限位放开 0-180 探索开/合角 (仅 DISARMED 生效,
+             * main.c 每拍门控; 失联复位自动清除) */
+            cJSON *on = cJSON_GetObjectItem(root, "on");
+            if (cJSON_IsNumber(on))    sp.grip_calib = (on->valuedouble != 0);
+            else if (cJSON_IsBool(on)) sp.grip_calib = cJSON_IsTrue(on);
         }
         else if (strcmp(item->valuestring, "flow_calib") == 0) {
             /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），

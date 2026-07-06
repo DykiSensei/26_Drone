@@ -139,6 +139,7 @@
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
 "<h3>机械爪 (MG995)</h3>\n" \
 "<div class=\"data-row\"><span>当前角度</span><span id=\"grip-angle\">--</span></div>\n" \
+"<div class=\"data-row\"><span>舵机标定 (解锁全量程,仅锁定态)</span><span><button id=\"gc-btn\" onclick=\"toggleGripCalib()\">OFF</button></span></div>\n" \
 "<div style=\"display:flex;gap:6px;margin-top:4px\">\n" \
 "<button style=\"flex:1\" onclick=\"gripAction('open')\" ontouchstart=\"event.preventDefault();gripAction('open')\">张开</button>\n" \
 "<button style=\"flex:1\" onclick=\"gripAction('close')\" ontouchstart=\"event.preventDefault();gripAction('close')\">闭合</button>\n" \
@@ -200,6 +201,7 @@
 "throttle=0;roll=0;pitch=0;yaw=0;mode='disarmed';\n" \
 "motorPWM=[1000,1000,1000,1000];motorTrim=[0,0,0,0];\n" \
 "flowCalib=0;if($('fc-btn'))setFlowCalibUI();\n" \
+"gripCalib=0;if($('gc-btn'))setGripCalibUI();\n" \
 "$('throttle-slider').value=0;$('throttle-val').textContent='0%';\n" \
 "$('yaw-slider').value=0;$('yaw-val').textContent='0.00';\n" \
 "let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');\n" \
@@ -232,6 +234,9 @@
 "function adjTrim(idx,d){motorTrim[idx]=Math.max(-0.15,Math.min(0.15,(motorTrim[idx]||0)+d));$('mtrim-'+idx).textContent=motorTrim[idx].toFixed(2);sendStick()}\n" \
 "function gripAction(a){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',action:a}));showToast(a==='open'?'张开机械爪':'闭合机械爪')}\n" \
 "function sendGripAngle(v){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',angle:v}))}\n" \
+"var gripCalib=0;\n" \
+"function setGripCalibUI(){var b=$('gc-btn');b.textContent=gripCalib?'ON':'OFF';b.style.background=gripCalib?'#d2991d':'';b.style.color=gripCalib?'#fff':'';var s=$('grip-slider');s.max=gripCalib?180:90;if(!gripCalib&&parseFloat(s.value)>90){s.value=90;$('grip-slider-val').textContent='90'}}\n" \
+"function toggleGripCalib(){if(!connected)return;gripCalib=gripCalib?0:1;ws.send(JSON.stringify({cmd:'grip_calib',on:gripCalib}));setGripCalibUI();showToast(gripCalib?'舵机标定开启: 滑条0-180, 慢速小步移动! 超行程会空转打滑':'舵机标定关闭: 恢复0-90限位',1)}\n" \
 "function grabStart(){if(!connected)return;if(confirm('测试抓取任务?\\n\\n假设当前位置精确, 直接下降到触发高度闭爪, 然后返回当前高度。\\n确保正下方有目标, 且飞机处于定高/定点模式!')){ws.send(JSON.stringify({cmd:'grab_start',test:1}));showToast('测试抓取启动',true)}}\n" \
 "function grabAbort(){if(!connected)return;ws.send(JSON.stringify({cmd:'grab_abort'}));showToast('抓取任务中止',true)}\n" \
 "function markDrop(){if(!connected)return;ws.send(JSON.stringify({cmd:'mark_drop'}));showToast('标记投放点 (需悬停+光流可信)',true)}\n" \

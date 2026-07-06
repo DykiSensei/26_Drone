@@ -678,7 +678,10 @@ void app_main(void)
         g_prev_mode = sp->mode;
 
         /* 机械爪：任意模式生效（DISARMED 台架调试 / 飞行中抓取），目标角
-         * 经 setpoint 下发，限速逼近防电流尖峰与反扭矩 */
+         * 经 setpoint 下发，限速逼近防电流尖峰与反扭矩。
+         * 舵机标定模式每拍门控：只在 DISARMED 下生效，解锁瞬间自动退出、
+         * 限位收回 90°（超限目标由驱动慢速滑回合法区） */
+        servo_grip_set_calib_mode(sp->mode == MODE_DISARMED && sp->grip_calib);
         servo_grip_set_angle(sp->grip_angle);
         servo_grip_update(dt);
 
