@@ -66,7 +66,8 @@ typedef struct __attribute__((packed)) {
     int16_t  vz_mms;      /* 垂直速度 mm/s，向上为正 */
     uint8_t  flow_qual;   /* 光流质量原始值（参考） */
     uint8_t  mode;        /* flight_mode_t: 0=DISARMED 1=STAB 2=ALT 3=POS */
-    uint8_t  grip_deg;    /* 机械爪当前角 0–90（0=张开，90=闭合） */
+    uint8_t  grip_deg;    /* 机械爪当前角 0–117（0=完全张开，110=抓取闭合预设，
+                           * 117=行程极限；2026-07-06 新爪体标定值） */
     uint8_t  flags;       /* P4LINK_F_* 位组合 */
 } p4link_state_t;         /* payload = 18 字节，线上 24 字节 */
 

@@ -144,8 +144,8 @@
 "<button style=\"flex:1\" onclick=\"gripAction('open')\" ontouchstart=\"event.preventDefault();gripAction('open')\">张开</button>\n" \
 "<button style=\"flex:1\" onclick=\"gripAction('close')\" ontouchstart=\"event.preventDefault();gripAction('close')\">闭合</button>\n" \
 "</div>\n" \
-"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">调试角度 (0=张开, 90=闭合): <span id=\"grip-slider-val\">0</span>°</label><br>\n" \
-"<input type=\"range\" id=\"grip-slider\" min=\"0\" max=\"90\" step=\"1\" value=\"0\" style=\"width:100%\"></div>\n" \
+"<div style=\"margin:4px 0\"><label style=\"font-size:12px\">调试角度 (0=张开, 110=闭合, 117=行程极限): <span id=\"grip-slider-val\">0</span>°</label><br>\n" \
+"<input type=\"range\" id=\"grip-slider\" min=\"0\" max=\"117\" step=\"1\" value=\"0\" style=\"width:100%\"></div>\n" \
 "</div>\n" \
 "<div class=\"panel\" style=\"margin-top:6px;width:100%\">\n" \
 "<h3>抓取任务</h3>\n" \
@@ -235,8 +235,8 @@
 "function gripAction(a){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',action:a}));showToast(a==='open'?'张开机械爪':'闭合机械爪')}\n" \
 "function sendGripAngle(v){if(!connected)return;ws.send(JSON.stringify({cmd:'grip',angle:v}))}\n" \
 "var gripCalib=0;\n" \
-"function setGripCalibUI(){var b=$('gc-btn');b.textContent=gripCalib?'ON':'OFF';b.style.background=gripCalib?'#d2991d':'';b.style.color=gripCalib?'#fff':'';var s=$('grip-slider');s.max=gripCalib?180:90;if(!gripCalib&&parseFloat(s.value)>90){s.value=90;$('grip-slider-val').textContent='90'}}\n" \
-"function toggleGripCalib(){if(!connected)return;gripCalib=gripCalib?0:1;ws.send(JSON.stringify({cmd:'grip_calib',on:gripCalib}));setGripCalibUI();showToast(gripCalib?'舵机标定开启: 滑条0-180, 慢速小步移动! 超行程会空转打滑':'舵机标定关闭: 恢复0-90限位',1)}\n" \
+"function setGripCalibUI(){var b=$('gc-btn');b.textContent=gripCalib?'ON':'OFF';b.style.background=gripCalib?'#d2991d':'';b.style.color=gripCalib?'#fff':'';var s=$('grip-slider');s.max=gripCalib?180:117;if(!gripCalib&&parseFloat(s.value)>117){s.value=117;$('grip-slider-val').textContent='117'}}\n" \
+"function toggleGripCalib(){if(!connected)return;gripCalib=gripCalib?0:1;ws.send(JSON.stringify({cmd:'grip_calib',on:gripCalib}));setGripCalibUI();showToast(gripCalib?'舵机标定开启: 滑条0-180, 慢速小步移动! 超行程会空转打滑':'舵机标定关闭: 恢复0-117限位',1)}\n" \
 "function grabStart(){if(!connected)return;if(confirm('测试抓取任务?\\n\\n假设当前位置精确, 直接下降到触发高度闭爪, 然后返回当前高度。\\n确保正下方有目标, 且飞机处于定高/定点模式!')){ws.send(JSON.stringify({cmd:'grab_start',test:1}));showToast('测试抓取启动',true)}}\n" \
 "function grabAbort(){if(!connected)return;ws.send(JSON.stringify({cmd:'grab_abort'}));showToast('抓取任务中止',true)}\n" \
 "function markDrop(){if(!connected)return;ws.send(JSON.stringify({cmd:'mark_drop'}));showToast('标记投放点 (需悬停+光流可信)',true)}\n" \

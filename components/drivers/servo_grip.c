@@ -20,7 +20,7 @@ static const char *TAG = "servo_grip";
 #define GRIP_MAX_PULSE_US 2500             /* 180° */
 #define GRIP_ANGLE_FULL   180.0f           /* 脉宽映射满量程（勿用于钳位） */
 
-/* 限速逼近速度：90° 行程约 0.75s。太快 = 电流尖峰 + 飞行中反扭矩 */
+/* 限速逼近速度：110° 行程约 0.9s。太快 = 电流尖峰 + 飞行中反扭矩 */
 #define GRIP_SPEED_DPS       120.0f
 /* 标定模式转速：慢速探索行程极限，超程打滑前来得及收手 */
 #define GRIP_SPEED_CALIB_DPS 45.0f
@@ -41,7 +41,7 @@ static void grip_write(float deg)
 
 static float clamp_angle(float deg)
 {
-    /* 硬限位 90°：齿条行程极限，超过舵机空转打滑（2026-07-05 台架实测）。
+    /* 硬限位 117°：齿条行程极限，超过舵机空转打滑（2026-07-06 标定实测）。
      * 这里是最后一道防线——无论 commander/前端/未来 P4 状态机发什么都钳住。
      * 标定模式例外：放开到物理全量程 0-180 以探索新爪体的开/合角。 */
     float max = g_calib_mode ? GRIP_ANGLE_FULL : SERVO_GRIP_MAX_DEG;

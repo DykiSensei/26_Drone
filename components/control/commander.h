@@ -55,11 +55,11 @@ typedef struct {
                              * running (motors stay stopped) so flow_scale can be
                              * calibrated by hand-carrying the drone — no arming,
                              * props stay on. Cleared on safety reset. */
-    float grip_angle;       /* 机械爪目标角 0–90°（任意模式生效；失联复位时保留，
+    float grip_angle;       /* 机械爪目标角 0–117°（任意模式生效；失联复位时保留，
                              * 防止断连瞬间松爪掉落已抓取的目标） */
     bool  grip_calib;       /* 舵机标定模式: 仅 DISARMED 生效 (main.c 门控),
                              * 限位放开 0–180 探索新爪体开/合角, 慢速 45°/s;
-                             * 失联复位清除 (恢复 90° 硬限位) */
+                             * 失联复位清除 (恢复 117° 硬限位) */
     float grab_tof_m;       /* 抓取触发高度: TOF 读数低于此即闭爪（TOF 离地安装
                              * 高度 ≈0.20m，默认 0.20；前端 grab_cfg 滑条调试；
                              * 失联复位保留） */

@@ -6,13 +6,15 @@
 extern "C" {
 #endif
 
-/* 机械爪开/合角（2026-07-05 台架实测）：0° 完全张开，90° 完全闭合。
- * ⚠️ 90° 时齿条行程用尽，再往上舵机空转打滑——SERVO_GRIP_MAX_DEG 是驱动层
- * 硬限位，clamp 在驱动内部执行，任何上层调用都不可能越过。
+/* 机械爪开/合角（2026-07-06 舵机标定模式实测，新爪体）：0° 完全张开，
+ * 117° 齿条行程极限（完全闭合）。闭合预设取 110°——留 7° 余量，抓到物体
+ * 时舵机不顶极限持续堵转（MG995 堵转 1A+ 会过热）。
+ * SERVO_GRIP_MAX_DEG 是驱动层硬限位，clamp 在驱动内部执行，任何上层调用
+ * 都不可能越过；超过 117° 舵机空转打滑。
  * 机械爪兼作起落架：地面停放/上电默认必须完全张开（OPEN=0°，init 即输出）。 */
 #define SERVO_GRIP_OPEN_DEG    0.0f
-#define SERVO_GRIP_CLOSE_DEG   90.0f
-#define SERVO_GRIP_MAX_DEG     90.0f   /* 机械硬限位：齿条行程极限，超过即空转 */
+#define SERVO_GRIP_CLOSE_DEG   110.0f  /* 抓取闭合角：行程极限 −7° 防堵转 */
+#define SERVO_GRIP_MAX_DEG     117.0f  /* 机械硬限位：齿条行程极限，超过即空转 */
 
 /**
  * @brief 初始化机械爪舵机（LEDC TIMER_1 / 通道 4，50Hz，GPIO10）
