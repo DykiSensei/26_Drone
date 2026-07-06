@@ -177,6 +177,17 @@ static void build_telemetry(char *buf, size_t sz,
     float hdg = atan2f(mag->y, mag->x) * 57.29578f;
     if (hdg < 0) hdg += 360.0f;
 
+    /* P4 最近一帧原始测量 + 链路统计（联调可观测：无需盯 P4 串口）。
+     * peek 非消费，与主循环的 take 门控路径互不干扰；tk=-1 表示从未收到帧 */
+    p4link_target_t p4last;
+    int p4dx = 0, p4dy = 0, p4cf = 0, p4tk = -1;
+    if (p4link_peek_target(&p4last, NULL)) {
+        p4dx = p4last.dx_mm; p4dy = p4last.dy_mm;
+        p4cf = p4last.conf;  p4tk = p4last.track;
+    }
+    uint32_t p4rok = 0, p4cer = 0;
+    p4link_get_stats(&p4rok, &p4cer);
+
     snprintf(buf, sz,
         "{"
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
@@ -185,7 +196,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
         "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
         "\"grip\":%.1f,"
-        "\"grab\":{\"st\":%d,\"p4\":%d,\"mk\":%d},"
+        "\"grab\":{\"st\":%d,\"p4\":%d,\"mk\":%d,\"dx\":%d,\"dy\":%d,\"cf\":%d,\"tk\":%d,\"rok\":%u,\"cer\":%u},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
@@ -201,6 +212,7 @@ static void build_telemetry(char *buf, size_t sz,
         mag->x, mag->y, mag->z, hdg, mag->valid ? 1 : 0,
         servo_grip_get_angle(),
         (int)g_grab.state, p4link_alive() ? 1 : 0, g_grab.mark_valid ? 1 : 0,
+        p4dx, p4dy, p4cf, p4tk, (unsigned)p4rok, (unsigned)p4cer,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],

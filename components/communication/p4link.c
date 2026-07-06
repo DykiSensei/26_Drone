@@ -173,6 +173,20 @@ bool p4link_take_target(p4link_target_t *out, int64_t *rx_time_us)
     return fresh;
 }
 
+bool p4link_peek_target(p4link_target_t *out, int64_t *rx_time_us)
+{
+    if (!g_initialized || !out) return false;
+    bool ever;
+    portENTER_CRITICAL(&g_mux);
+    ever = (g_target_rx_us != 0);   /* rx 时刻恒 >0，用作"曾收到过"标志 */
+    if (ever) {
+        *out = g_target;
+        if (rx_time_us) *rx_time_us = g_target_rx_us;
+    }
+    portEXIT_CRITICAL(&g_mux);
+    return ever;
+}
+
 bool p4link_alive(void)
 {
     if (!g_initialized) return false;

@@ -37,6 +37,16 @@ void p4link_send_state(const p4link_state_t *st);
 bool p4link_take_target(p4link_target_t *out, int64_t *rx_time_us);
 
 /**
+ * @brief 查看最近一帧 MSG_TARGET（**非消费**：不影响 take 语义的 fresh 标志）。
+ *        仅供遥测/联调观察最新原始测量（dx/dy/conf/track），与 p4link_take_target
+ *        的门控消费路径互不干扰。
+ * @param out         输出最近一帧原始测量（若从未收到则不写）
+ * @param rx_time_us  可为 NULL；输出该帧的本地接收时刻
+ * @return true=曾收到过至少一帧；false=从未收到（out 未写）
+ */
+bool p4link_peek_target(p4link_target_t *out, int64_t *rx_time_us);
+
+/**
  * @brief 链路存活：P4LINK_LINK_TIMEOUT_MS 内收到过任何 CRC 正确的帧
  */
 bool p4link_alive(void);

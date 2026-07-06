@@ -151,6 +151,8 @@
 "<h3>抓取任务</h3>\n" \
 "<div class=\"data-row\"><span>状态 / P4链路</span><span><span id=\"grab-st\">待机</span> / <span id=\"grab-p4\">离线</span></span></div>\n" \
 "<div class=\"data-row\"><span>投放点</span><span id=\"grab-mk\">未标记</span></div>\n" \
+"<div class=\"data-row\"><span>P4 测量</span><span id=\"grab-meas\">无帧</span></div>\n" \
+"<div class=\"data-row\"><span>P4 链路 rx/crc</span><span id=\"grab-stats\">0 / 0</span></div>\n" \
 "<div style=\"margin:4px 0\"><label style=\"font-size:12px\">抓取触发高度 (TOF读数): <span id=\"grab-tof-val\">0.20</span> m</label><br>\n" \
 "<input type=\"range\" id=\"grab-tof\" min=\"0.10\" max=\"0.40\" step=\"0.01\" value=\"0.20\" style=\"width:100%\"></div>\n" \
 "<div style=\"margin:4px 0\"><label style=\"font-size:12px\">投放张爪高度 (TOF读数): <span id=\"grab-drop-val\">0.30</span> m</label><br>\n" \
@@ -222,7 +224,7 @@
 "if(d.trim){$('trim-roll').textContent=d.trim.roll.toFixed(1)+'°';$('trim-pitch').textContent=d.trim.pitch.toFixed(1)+'°'}\n" \
 "if(d.mtrim){for(let i=0;i<4;i++){let e=$('mtrim-'+i);if(e)e.textContent=d.mtrim[i].toFixed(2)}}\n" \
 "if(d.grip!=null){$('grip-angle').textContent=d.grip.toFixed(0)+'\\u00b0'}\n" \
-"if(d.grab){var gn=['待机','对准','下降','抓取','上升','返航','投放'],ge=$('grab-st');ge.textContent=gn[d.grab.st]||'?';ge.style.color=d.grab.st?'#d2991d':'#8b949e';var pe=$('grab-p4');pe.textContent=d.grab.p4?'在线':'离线';pe.style.color=d.grab.p4?'#7ee787':'#8b949e';if(d.grab.mk!=null){var mke=$('grab-mk');mke.textContent=d.grab.mk?'已标记':'未标记';mke.style.color=d.grab.mk?'#7ee787':'#8b949e'}}\n" \
+"if(d.grab){var gn=['待机','对准','下降','抓取','上升','返航','投放'],ge=$('grab-st');ge.textContent=gn[d.grab.st]||'?';ge.style.color=d.grab.st?'#d2991d':'#8b949e';var pe=$('grab-p4');pe.textContent=d.grab.p4?'在线':'离线';pe.style.color=d.grab.p4?'#7ee787':'#8b949e';if(d.grab.mk!=null){var mke=$('grab-mk');mke.textContent=d.grab.mk?'已标记':'未标记';mke.style.color=d.grab.mk?'#7ee787':'#8b949e'}if(d.grab.tk!=null){var tn=['搜索','锁定','丢失'],me=$('grab-meas');if(d.grab.tk<0){me.textContent='无帧';me.style.color='#8b949e'}else{me.textContent='dx='+d.grab.dx+' dy='+d.grab.dy+'mm cf='+d.grab.cf+' '+(tn[d.grab.tk]||'?');me.style.color=d.grab.tk==1?'#7ee787':'#8b949e'}var se=$('grab-stats');se.textContent=d.grab.rok+' / '+d.grab.cer;se.style.color=d.grab.cer?'#d2991d':'#8b949e'}}\n" \
 "}catch(ex){}\n" \
 "}\n" \
 "}connect();\n" \
