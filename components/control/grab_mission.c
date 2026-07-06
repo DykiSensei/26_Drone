@@ -30,6 +30,11 @@ static const char *TAG = "grab";
 #define START_MARGIN_M     0.10f  /* 启动时须高于触发高度至少这么多 */
 #define GRAB_TOF_MIN_M     0.10f  /* 触发高度可调范围（TOF 落地读数≈0.20） */
 #define GRAB_TOF_MAX_M     0.50f
+#define DROP_TOF_MIN_M     0.15f  /* 投放高度可调范围（筐沿高度 + 落差） */
+#define DROP_TOF_MAX_M     0.60f
+#define GOTO_TOL_M         0.25f  /* 返航到标记点的到达容差（配大开口筐） */
+#define GOTO_CORR_GAP_S    1.0f   /* 返航 move_to 重发最小间隔（自愈用户干预） */
+#define GOTO_TIMEOUT_S     30.0f
 
 static bool tof_ok(uint16_t mm) { return mm >= 40 && mm <= 4000; }
 
@@ -58,8 +63,12 @@ static void mission_abort_internal(grab_mission_t *gm, altitude_ctrl_t *alt,
 void grab_mission_init(grab_mission_t *gm)
 {
     gm->state = GRAB_IDLE;
+    gm->mission = GRAB_MISSION_GRAB;
     gm->test_mode = false;
     gm->grab_tof_m = 0.20f;
+    gm->drop_tof_m = 0.30f;
+    gm->mark_x = gm->mark_y = 0.0f;
+    gm->mark_valid = false;
     gm->start_alt_m = 0.0f;
     gm->state_since_us = 0;
     gm->mission_since_us = 0;
@@ -113,6 +122,7 @@ int grab_mission_start(grab_mission_t *gm, bool test_mode, bool p4_alive,
         return -1;
     }
 
+    gm->mission = GRAB_MISSION_GRAB;
     gm->test_mode = test_mode;
     gm->grab_tof_m = grab_tof;
     gm->start_alt_m = alt->target_valid ? alt->target_final_m : tof_m;
@@ -138,6 +148,98 @@ int grab_mission_start(grab_mission_t *gm, bool test_mode, bool p4_alive,
                  tof_m, grab_tof);
     }
     return 0;
+}
+
+int grab_mission_start_drop(grab_mission_t *gm, bool use_goto,
+                            const setpoint_t *sp, altitude_ctrl_t *alt,
+                            const flow_hold_t *fh, uint16_t tof_mm)
+{
+    if (gm->state != GRAB_IDLE) {
+        ESP_LOGE(TAG, "投放拒绝: 任务进行中 (状态=%d)", gm->state);
+        return -1;
+    }
+    if (sp->mode != MODE_ALT_HOLD && sp->mode != MODE_POS_HOLD) {
+        ESP_LOGE(TAG, "投放拒绝: 需要定高/定点模式 (当前 %s)",
+                 commander_mode_name(sp->mode));
+        return -1;
+    }
+    if (!tof_ok(tof_mm)) {
+        ESP_LOGE(TAG, "投放拒绝: TOF 无效 (%u mm)", tof_mm);
+        return -1;
+    }
+
+    float tof_m = tof_mm * 0.001f;
+    float drop_tof = sp->drop_tof_m;
+    if (drop_tof < DROP_TOF_MIN_M) drop_tof = DROP_TOF_MIN_M;
+    if (drop_tof > DROP_TOF_MAX_M) drop_tof = DROP_TOF_MAX_M;
+
+    if (tof_m < drop_tof + START_MARGIN_M) {
+        ESP_LOGE(TAG, "投放拒绝: 高度不足 (TOF %.2fm, 需 > %.2fm)",
+                 tof_m, drop_tof + START_MARGIN_M);
+        return -1;
+    }
+    if (use_goto) {
+        if (!gm->mark_valid) {
+            ESP_LOGE(TAG, "返航投放拒绝: 投放点未标记 (先悬停筐上方按【标记投放点】)");
+            return -1;
+        }
+        if (fh->quality_gain < 0.05f) {
+            ESP_LOGE(TAG, "返航投放拒绝: 光流不可信 (qg=%.2f) — 航位导航不可用",
+                     fh->quality_gain);
+            return -1;
+        }
+    }
+
+    gm->mission = GRAB_MISSION_DROP;
+    gm->test_mode = false;
+    gm->drop_tof_m = drop_tof;
+    gm->start_alt_m = alt->target_valid ? alt->target_final_m : tof_m;
+    gm->result = 0;
+    gm->last_corr_us = 0;
+    gm->grasp_done_us = 0;
+    gm->mission_since_us = esp_timer_get_time();
+
+    if (use_goto) {
+        enter(gm, GRAB_GOTO);
+        ESP_LOGW(TAG, "返航投放: (%.2f, %.2f)m -> 标记点 (%.2f, %.2f)m, 投放高度 %.2fm",
+                 fh->pos_x_m, fh->pos_y_m, gm->mark_x, gm->mark_y, drop_tof);
+    } else {
+        float final = drop_tof - 0.05f;
+        if (final < 0.05f) final = 0.05f;
+        altitude_set_target(alt, final, tof_m);
+        enter(gm, GRAB_DESCEND);
+        ESP_LOGW(TAG, "就地投放: %.2fm 下降 -> 张爪高度 %.2fm (完成后回 %.2fm)",
+                 tof_m, drop_tof, gm->start_alt_m);
+    }
+    return 0;
+}
+
+int grab_mission_mark_drop(grab_mission_t *gm, const setpoint_t *sp,
+                           const flow_hold_t *fh)
+{
+    if (sp->mode != MODE_ALT_HOLD && sp->mode != MODE_POS_HOLD) {
+        ESP_LOGE(TAG, "标记拒绝: 需悬停在定高/定点模式 (当前 %s)",
+                 commander_mode_name(sp->mode));
+        return -1;
+    }
+    if (fh->quality_gain < 0.05f) {
+        ESP_LOGE(TAG, "标记拒绝: 光流不可信 (qg=%.2f), 坐标不可靠", fh->quality_gain);
+        return -1;
+    }
+    gm->mark_x = fh->pos_x_m;
+    gm->mark_y = fh->pos_y_m;
+    gm->mark_valid = true;
+    ESP_LOGW(TAG, "投放点已标记: (%.2f, %.2f)m — 仅本次解锁周期有效",
+             gm->mark_x, gm->mark_y);
+    return 0;
+}
+
+void grab_mission_clear_mark(grab_mission_t *gm)
+{
+    if (gm->mark_valid) {
+        gm->mark_valid = false;
+        ESP_LOGW(TAG, "投放点标记失效 (航位坐标系已复位)");
+    }
 }
 
 void grab_mission_abort(grab_mission_t *gm, altitude_ctrl_t *alt,
@@ -229,19 +331,54 @@ void grab_mission_update(grab_mission_t *gm, const setpoint_t *sp,
         }
         break;
 
-    case GRAB_DESCEND:
+    case GRAB_GOTO: {
+        /* 返航投放：航位推算 move_to 标记点。到达判据 = 距标记点 < 容差且
+         * 位置环已转入 hold；若用户方向键干预打断了 move_to（main 会 reset
+         * 后在当前点重锁），距离判据不满足 → 限速重发 move_to 自愈 */
+        if (since_s(gm->state_since_us) > GOTO_TIMEOUT_S) {
+            mission_abort_internal(gm, alt, tof_mm, "返航超时");
+            return;
+        }
+        float dx = gm->mark_x - fh->pos_x_m;
+        float dy = gm->mark_y - fh->pos_y_m;
+        float dist = fmaxf(fabsf(dx), fabsf(dy));
+        if (dist < GOTO_TOL_M && pos->active && pos->hold) {
+            float final = gm->drop_tof_m - 0.05f;
+            if (final < 0.05f) final = 0.05f;
+            altitude_set_target(alt, final, tof_m);
+            enter(gm, GRAB_DESCEND);
+            ESP_LOGW(TAG, "到达投放点 (偏差 %.2fm) — 下降到张爪高度 %.2fm",
+                     dist, gm->drop_tof_m);
+        } else if ((!pos->active || pos->hold)
+                   && (gm->last_corr_us == 0
+                       || since_s(gm->last_corr_us) > GOTO_CORR_GAP_S)) {
+            position_set_target(pos, dx, dy, fh->pos_x_m, fh->pos_y_m);
+            gm->last_corr_us = esp_timer_get_time();
+            ESP_LOGW(TAG, "返航 move_to: dx=%.2f dy=%.2f (剩余 %.2fm)", dx, dy, dist);
+        }
+        break; }
+
+    case GRAB_DESCEND: {
         if (since_s(gm->state_since_us) > DESCEND_TIMEOUT_S) {
             mission_abort_internal(gm, alt, tof_mm, "下降超时");
             return;
         }
-        if (tof_m <= gm->grab_tof_m) {
-            altitude_capture_target(alt, tof_m);   /* 停止下降，定高抓取 */
-            commander_set_grip(SERVO_GRIP_CLOSE_DEG);
+        float trig = (gm->mission == GRAB_MISSION_DROP) ? gm->drop_tof_m
+                                                        : gm->grab_tof_m;
+        if (tof_m <= trig) {
+            altitude_capture_target(alt, tof_m);   /* 停止下降，定高执行爪动作 */
             gm->grasp_done_us = 0;
-            enter(gm, GRAB_GRASP);
-            ESP_LOGW(TAG, "TOF %.2fm 触发 — 闭爪", tof_m);
+            if (gm->mission == GRAB_MISSION_DROP) {
+                commander_set_grip(SERVO_GRIP_OPEN_DEG);
+                enter(gm, GRAB_RELEASE);
+                ESP_LOGW(TAG, "TOF %.2fm 触发 — 张爪投放", tof_m);
+            } else {
+                commander_set_grip(SERVO_GRIP_CLOSE_DEG);
+                enter(gm, GRAB_GRASP);
+                ESP_LOGW(TAG, "TOF %.2fm 触发 — 闭爪", tof_m);
+            }
         }
-        break;
+        break; }
 
     case GRAB_GRASP:
         /* 每拍重写闭合角：与 WS 解析整结构体赋值的竞态即使丢写也 10ms 自愈 */
@@ -266,15 +403,44 @@ void grab_mission_update(grab_mission_t *gm, const setpoint_t *sp,
         }
         break;
 
+    case GRAB_RELEASE:
+        /* 投放张爪（GRASP 的镜像）：每拍重写张开角防 setpoint 竞态丢写 */
+        commander_set_grip(SERVO_GRIP_OPEN_DEG);
+        if (gm->grasp_done_us == 0) {
+            if (!servo_grip_is_moving()
+                && fabsf(servo_grip_get_angle() - SERVO_GRIP_OPEN_DEG) < 2.0f) {
+                gm->grasp_done_us = esp_timer_get_time();
+            }
+        } else if (since_s(gm->grasp_done_us) > GRASP_SETTLE_S) {
+            altitude_set_target(alt, gm->start_alt_m, tof_m);
+            enter(gm, GRAB_ASCEND);
+            ESP_LOGW(TAG, "投放完成 — 上升回 %.2fm", gm->start_alt_m);
+            break;
+        }
+        if (since_s(gm->state_since_us) > GRASP_TIMEOUT_S) {
+            altitude_set_target(alt, gm->start_alt_m, tof_m);
+            enter(gm, GRAB_ASCEND);
+            ESP_LOGW(TAG, "张爪超时(按已完成处理) — 上升回 %.2fm", gm->start_alt_m);
+        }
+        break;
+
     case GRAB_ASCEND:
-        commander_set_grip(SERVO_GRIP_CLOSE_DEG);   /* 上升全程保持夹紧 */
+        if (gm->mission == GRAB_MISSION_GRAB) {
+            commander_set_grip(SERVO_GRIP_CLOSE_DEG);   /* 抓取：上升全程保持夹紧 */
+        }
+        /* 投放：sp 已是张开值，不再干预（爪即起落架，回升后可直接降落） */
         if ((fabsf(tof_m - gm->start_alt_m) < ASCEND_TOL_M
              && fabsf(alt->vz) < VZ_STEADY_MS)
             || since_s(gm->state_since_us) > ASCEND_TIMEOUT_S) {
             gm->result = 1;
             enter(gm, GRAB_IDLE);
-            ESP_LOGW(TAG, "抓取任务完成 (%.1fs) — 爪保持闭合, 前端可手动张开投放",
-                     since_s(gm->mission_since_us));
+            if (gm->mission == GRAB_MISSION_DROP) {
+                ESP_LOGW(TAG, "投放任务完成 (%.1fs) — 爪已张开, 起落架就绪可降落",
+                         since_s(gm->mission_since_us));
+            } else {
+                ESP_LOGW(TAG, "抓取任务完成 (%.1fs) — 爪保持闭合, 可返航投放",
+                         since_s(gm->mission_since_us));
+            }
         }
         break;
 

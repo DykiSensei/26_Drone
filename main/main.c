@@ -50,6 +50,9 @@ static bool  g_takeoff_pending = false;   /* CMD_TAKEOFF 延迟到主循环处�
 static bool  g_grab_start_pending = false; /* CMD_GRAB_START 延迟到主循环处理 */
 static bool  g_grab_abort_pending = false; /* CMD_GRAB_ABORT 延迟到主循环处理 */
 static bool  g_grab_test_req = false;      /* grab_start 的 test 参数快照 */
+static bool  g_mark_drop_pending = false;  /* CMD_MARK_DROP 延迟到主循环处理 */
+static bool  g_drop_start_pending = false; /* CMD_DROP_START 延迟到主循环处理 */
+static bool  g_drop_goto_req = false;      /* drop_start 的 ret 参数快照 */
 static bool  g_position_lock_pending = false;  /* takeoff 期间延迟启动位置环：等飞机
                                                 * 稳定在目标高度后再锁定当前点，避免
                                                 * 上升阶段机身倾斜让光流积分带噪声 →
@@ -138,6 +141,14 @@ static void execute_pending_cmd(const setpoint_t *sp)
     case CMD_GRAB_ABORT:
         g_grab_abort_pending = true;
         break;
+    case CMD_MARK_DROP:
+        g_mark_drop_pending = true;
+        break;
+    case CMD_DROP_START:
+        g_drop_start_pending = true;
+        g_drop_goto_req = sp->drop_goto;
+        ESP_LOGW(TAG, "drop_start (%s)", sp->drop_goto ? "返航投放" : "就地投放");
+        break;
     default:
         break;
     }
@@ -174,7 +185,7 @@ static void build_telemetry(char *buf, size_t sz,
         "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
         "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
         "\"grip\":%.1f,"
-        "\"grab\":{\"st\":%d,\"p4\":%d},"
+        "\"grab\":{\"st\":%d,\"p4\":%d,\"mk\":%d},"
         "\"motor\":[%.2f,%.2f,%.2f,%.2f],"
         "\"mtrim\":[%.2f,%.2f,%.2f,%.2f],"
         "\"trim\":{\"roll\":%.2f,\"pitch\":%.2f},"
@@ -189,7 +200,7 @@ static void build_telemetry(char *buf, size_t sz,
         g_flow_hold.vx_est, g_flow_hold.vy_est,
         mag->x, mag->y, mag->z, hdg, mag->valid ? 1 : 0,
         servo_grip_get_angle(),
-        (int)g_grab.state, p4link_alive() ? 1 : 0,
+        (int)g_grab.state, p4link_alive() ? 1 : 0, g_grab.mark_valid ? 1 : 0,
         g_motor_out[0], g_motor_out[1], g_motor_out[2], g_motor_out[3],
         commander_get_setpoint()->mtrim[0],
         commander_get_setpoint()->mtrim[1],
@@ -452,6 +463,15 @@ void app_main(void)
             g_grab_abort_pending = false;
             grab_mission_abort(&g_grab, &g_alt, tof_mm, "前端中止");
         }
+        if (g_mark_drop_pending) {
+            g_mark_drop_pending = false;
+            grab_mission_mark_drop(&g_grab, sp, &g_flow_hold);
+        }
+        if (g_drop_start_pending) {
+            g_drop_start_pending = false;
+            grab_mission_start_drop(&g_grab, g_drop_goto_req, sp, &g_alt,
+                                    &g_flow_hold, tof_mm);
+        }
         {
             /* P4 测量安全门（协议四道门 + 准静态门，默认值见 p4link_protocol.h）：
              * 限幅 ±1m → track=LOCKED → conf≥50 → ts_echo 有效且陈旧度 ≤200ms
@@ -507,6 +527,7 @@ void app_main(void)
              * （2026-07-04 标定模式开启瞬间实测复现，起飞推油门同理）。 */
             if (!sp->flow_calib) {
                 flow_hold_reset(&g_flow_hold);
+                grab_mission_clear_mark(&g_grab);   /* 坐标系复位, 投放点标记随之失效 */
             }
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */
@@ -518,6 +539,7 @@ void app_main(void)
                 pid_reset(&pid_yaw);
                 altitude_reset(&g_alt);
                 flow_hold_reset(&g_flow_hold);
+                grab_mission_clear_mark(&g_grab);   /* 坐标系复位, 标记失效 */
                 position_reset(&g_position);
                 g_position_lock_pending = false;
                 /* g_ax_filt/g_ay_filt 不清零：输入滤波必须连续运行，否则

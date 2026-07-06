@@ -28,7 +28,9 @@ typedef enum {
     CMD_MOVE_STOP,        /* Stop all horizontal movement */
     CMD_TAKEOFF,          /* Auto takeoff to specified height */
     CMD_GRAB_START,       /* 启动抓取任务 (grab_test 区分测试/P4 正式流程) */
-    CMD_GRAB_ABORT,       /* 中止抓取任务 */
+    CMD_GRAB_ABORT,       /* 中止抓取/投放任务 */
+    CMD_MARK_DROP,        /* 标记当前位置为投放点 (悬停筐上方时按) */
+    CMD_DROP_START,       /* 启动投放任务 (drop_goto 区分返航/就地) */
 } commander_cmd_t;
 
 typedef struct {
@@ -60,6 +62,9 @@ typedef struct {
                              * 失联复位保留） */
     bool  grab_test;        /* CMD_GRAB_START 参数: true=无 P4 测试流程
                              * (跳过视觉对准, 假设当前位置精确) */
+    float drop_tof_m;       /* 投放张爪高度: TOF 读数 (默认 0.30, 前端可调;
+                             * 失联复位保留) */
+    bool  drop_goto;        /* CMD_DROP_START 参数: true=先返航到标记投放点 */
     commander_cmd_t pending_cmd;  /* deferred cmd for main loop execution */
 } setpoint_t;
 

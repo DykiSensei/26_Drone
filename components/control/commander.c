@@ -31,6 +31,8 @@ static setpoint_t g_sp = {
     .grip_angle   = SERVO_GRIP_OPEN_DEG,   /* 上电张开，与 servo_grip_init 一致 */
     .grab_tof_m   = 0.20f,   /* TOF 落地读数 ≈0.20m（安装高度），前端可调 */
     .grab_test    = false,
+    .drop_tof_m   = 0.30f,   /* 投放张爪高度（筐沿以上），前端可调 */
+    .drop_goto    = false,
     .pending_cmd  = CMD_NONE,
 };
 
@@ -205,10 +207,24 @@ void commander_parse(const char *json, int len)
             sp.pending_cmd = CMD_GRAB_ABORT;
         }
         else if (strcmp(item->valuestring, "grab_cfg") == 0) {
-            /* 抓取参数调试（非阻塞经 setpoint）：tof = 触发闭爪的 TOF 读数 */
+            /* 抓取/投放参数调试（非阻塞经 setpoint）：
+             * tof = 触发闭爪高度; drop = 触发张爪高度（均为 TOF 读数） */
             cJSON *gt = cJSON_GetObjectItem(root, "tof");
             if (cJSON_IsNumber(gt))
                 sp.grab_tof_m = clamp((float)gt->valuedouble, 0.10f, 0.50f);
+            cJSON *dp = cJSON_GetObjectItem(root, "drop");
+            if (cJSON_IsNumber(dp))
+                sp.drop_tof_m = clamp((float)dp->valuedouble, 0.15f, 0.60f);
+        }
+        else if (strcmp(item->valuestring, "mark_drop") == 0) {
+            sp.pending_cmd = CMD_MARK_DROP;
+        }
+        else if (strcmp(item->valuestring, "drop_start") == 0) {
+            /* 投放任务：ret=1 先返航到标记投放点, 缺省/0 就地投放 */
+            cJSON *rt = cJSON_GetObjectItem(root, "ret");
+            sp.drop_goto = (cJSON_IsNumber(rt) && rt->valuedouble != 0)
+                        || cJSON_IsTrue(rt);
+            sp.pending_cmd = CMD_DROP_START;
         }
         else if (strcmp(item->valuestring, "flow_calib") == 0) {
             /* 光流标定模式开关：DISARMED 下估计器不复位（电机始终停转），
@@ -272,6 +288,7 @@ void commander_reset_setpoint(void)
     safe.grip_angle = g_sp.grip_angle;  /* 保留爪状态：断连复位若强制张开，
                                          * 会把已抓取的目标当场掉落 */
     safe.grab_tof_m = g_sp.grab_tof_m;  /* 保留抓取高度调试值 */
+    safe.drop_tof_m = g_sp.drop_tof_m;  /* 保留投放高度调试值 */
     g_sp = safe;
     g_last_command_us = 0;  /* 重置时间戳，避免循环触发超时 */
     ESP_LOGW(TAG, "setpoint reset to DISARMED (safety)");

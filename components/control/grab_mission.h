@@ -33,7 +33,15 @@ typedef enum {
     GRAB_DESCEND = 2,   /* 末段下降，等 TOF 到触发高度 */
     GRAB_GRASP   = 3,   /* 定高闭爪 */
     GRAB_ASCEND  = 4,   /* 回起始高度 */
+    GRAB_GOTO    = 5,   /* 返航投放：move_to 标记投放点（航位推算导航） */
+    GRAB_RELEASE = 6,   /* 定高张爪投放 */
 } grab_state_t;
+
+/* 任务类型：抓取（下降→闭爪→回升）或投放（[返航→]下降→张爪→回升） */
+typedef enum {
+    GRAB_MISSION_GRAB = 0,
+    GRAB_MISSION_DROP = 1,
+} grab_mission_kind_t;
 
 /* 已通过全部安全门（协议四道门+准静态门，main.c 负责）的视觉测量 */
 typedef struct {
@@ -43,8 +51,12 @@ typedef struct {
 
 typedef struct {
     grab_state_t state;
+    grab_mission_kind_t mission;  /* 本次任务类型（GRAB/DROP） */
     bool    test_mode;        /* true=无 P4 测试（跳过 ALIGN，不用视觉修正） */
     float   grab_tof_m;       /* 触发闭爪的 TOF 读数（任务开始时从 sp 拷贝） */
+    float   drop_tof_m;       /* 触发张爪的 TOF 读数（投放高度，从 sp 拷贝） */
+    float   mark_x, mark_y;   /* 标记的投放点（flow 航位推算坐标系, m） */
+    bool    mark_valid;       /* 标记有效——坐标系复位(DISARM/油门切断)即失效 */
     float   start_alt_m;      /* 任务起始保持高度，抓取后回到这里 */
     int64_t state_since_us;
     int64_t mission_since_us;
@@ -65,6 +77,28 @@ void grab_mission_init(grab_mission_t *gm);
 int grab_mission_start(grab_mission_t *gm, bool test_mode, bool p4_alive,
                        const setpoint_t *sp, altitude_ctrl_t *alt,
                        uint16_t tof_mm);
+
+/**
+ * @brief 启动投放任务。use_goto=true 先 move_to 返航到标记投放点再下降张爪
+ *        （需标记有效 + 光流可信）；false 就地下降张爪。
+ *        前置校验：ALT/POS_HOLD、TOF 有效且高于投放高度+10cm。
+ * @return 0=已启动, -1=校验失败（原因见日志）
+ */
+int grab_mission_start_drop(grab_mission_t *gm, bool use_goto,
+                            const setpoint_t *sp, altitude_ctrl_t *alt,
+                            const flow_hold_t *fh, uint16_t tof_mm);
+
+/**
+ * @brief 标记当前位置为投放点（悬停在垃圾筐上方时按）。
+ *        要求 ALT/POS_HOLD + 光流融合可信（quality_gain ≥ 0.05）。
+ *        ⚠️ 只在同一解锁周期内有效——航位坐标系复位时必须调 clear_mark。
+ * @return 0=已标记, -1=拒绝
+ */
+int grab_mission_mark_drop(grab_mission_t *gm, const setpoint_t *sp,
+                           const flow_hold_t *fh);
+
+/** @brief 投放点标记失效（与 flow_hold_reset 同点调用——坐标系已复位） */
+void grab_mission_clear_mark(grab_mission_t *gm);
 
 /**
  * @brief 中止任务：回到起始高度，爪保持当前角（绝不强制张开——防掉落）
