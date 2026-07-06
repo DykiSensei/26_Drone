@@ -66,16 +66,8 @@ void altitude_capture_target(altitude_ctrl_t *alt, float current_m)
     altitude_set_target(alt, current_m, current_m);
 }
 
-float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float dt)
+void altitude_update_vz(altitude_ctrl_t *alt, float current_m, float az_up, float dt)
 {
-    if (!alt->target_valid) return 0.0f;
-
-    /* Ramp the working target toward the final target (slew-rate limit). */
-    float step = ALT_RAMP_RATE * dt;
-    if (alt->target_m < alt->target_final_m - step)      alt->target_m += step;
-    else if (alt->target_m > alt->target_final_m + step) alt->target_m -= step;
-    else                                                 alt->target_m = alt->target_final_m;
-
     /* Vertical speed via complementary filter:
      *   - predict every loop with IMU world-up accel (high-rate, low-latency,
      *     but drifts due to accel bias);
@@ -86,7 +78,7 @@ float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float 
      * 只积分高通分量：扣掉 az_lp 直流（残余零偏 + 振动整流），否则
      * 稳态偏移 ≈ 0.5×直流 直接卡死起飞位置锁的 |vz|<0.15 门。 */
     alt->vz += (az_up - alt->az_lp) * dt;
-    if (current_m != alt->prev_m) {
+    if (current_m > 0.001f && current_m != alt->prev_m) {
         int64_t now = esp_timer_get_time();
         float dt_meas = (alt->last_change_us == 0)
                       ? 0.1f
@@ -98,6 +90,20 @@ float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float 
         alt->prev_m = current_m;
         alt->last_change_us = now;
     }
+}
+
+float altitude_update(altitude_ctrl_t *alt, float current_m, float az_up, float dt)
+{
+    /* vz 互补滤波每拍都跑（不依赖 target），供 vz 阻尼与遥测使用 */
+    altitude_update_vz(alt, current_m, az_up, dt);
+
+    if (!alt->target_valid) return 0.0f;
+
+    /* Ramp the working target toward the final target (slew-rate limit). */
+    float step = ALT_RAMP_RATE * dt;
+    if (alt->target_m < alt->target_final_m - step)      alt->target_m += step;
+    else if (alt->target_m > alt->target_final_m + step) alt->target_m -= step;
+    else                                                 alt->target_m = alt->target_final_m;
 
     /* P + I (runs every loop; pid integrates with the main-loop dt). */
     float pi = pid_update(&alt->pid, alt->target_m, current_m, dt);

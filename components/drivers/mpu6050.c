@@ -188,6 +188,11 @@ int mpu6050_recalibrate_gyro(void)
     return 0;
 }
 
+float mpu6050_get_accel_z_bias(void)
+{
+    return g_accel_offs[2];
+}
+
 int mpu6050_read(mpu6050_data_t *out)
 {
     if (!out) return -1;

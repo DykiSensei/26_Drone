@@ -54,6 +54,13 @@ void altitude_set_target(altitude_ctrl_t *alt, float final_m, float current_m);
 void altitude_track_az(altitude_ctrl_t *alt, float az_up, float dt);
 
 /**
+ * @brief 仅更新垂直速度估计 vz（IMU/TOF 互补滤波），不跑 PID、不需要 target。
+ *        供测试模式在 DISARMED 下观察 vz（电机停转），也被 altitude_update 内部
+ *        复用。current_m 无效(0)时只做 IMU 积分部分。
+ */
+void altitude_update_vz(altitude_ctrl_t *alt, float current_m, float az_up, float dt);
+
+/**
  * @brief Run altitude PID (P+I + vz damping via IMU/TOF complementary filter)
  * @param alt        controller instance
  * @param current_m  current TOF distance in meters

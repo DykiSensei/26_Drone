@@ -35,6 +35,13 @@ int mpu6050_recalibrate_gyro(void);
  */
 int mpu6050_read(mpu6050_data_t *out);
 
+/**
+ * @brief 读取当前 accel-Z 零偏（m/s²，= 实测重力 − 标准重力）。
+ *        遥测暴露给前端，免串口即可确认零偏大小（该值 × 0.5 ≈ 修复前
+ *        Vz 稳态假读数）。校准后更新。
+ */
+float mpu6050_get_accel_z_bias(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -181,7 +181,7 @@ static void build_telemetry(char *buf, size_t sz,
         "{"
         "\"attitude\":{\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f},"
         "\"tof\":%u,"
-        "\"alt\":{\"target\":%.2f,\"vz\":%.2f},"
+        "\"alt\":{\"target\":%.2f,\"vz\":%.2f,\"azb\":%.3f},"
         "\"flow\":{\"x\":%.2f,\"y\":%.2f,\"qual\":%u,\"qg\":%.2f,\"ps\":%d,\"tx\":%.2f,\"ty\":%.2f,\"vx\":%.2f,\"vy\":%.2f},"
         "\"mag\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"hdg\":%.1f,\"ok\":%d},"
         "\"grip\":%.1f,"
@@ -193,7 +193,7 @@ static void build_telemetry(char *buf, size_t sz,
         "}",
         roll, pitch, yaw,
         tof_mm,
-        g_alt.target_m, g_alt.vz,
+        g_alt.target_m, g_alt.vz, mpu6050_get_accel_z_bias(),
         g_flow_hold.pos_x_m, g_flow_hold.pos_y_m, flow->qual,
         g_flow_hold.quality_gain,
         pos_state, g_position.target_x, g_position.target_y,
@@ -521,22 +521,25 @@ void app_main(void)
             pid_reset(&pid_roll);
             pid_reset(&pid_pitch);
             pid_reset(&pid_yaw);
-            altitude_reset(&g_alt);
             position_reset(&g_position);
             g_position_lock_pending = false;
-            /* flow_calib 标定模式：本分支电机始终停转（上面 motor_stop），
-             * 但跳过速度/位置估计器复位 —— 手持移动飞机、看遥测 X(m) 即可
-             * 安全标定 flow_scale，无需拆桨解锁。断连/超时复位 setpoint 时
-             * flow_calib 自动清零，恢复正常复位行为；解锁起飞时低油门分支
-             * 无条件复位，手持残留不会带入飞行。
-             * 注意：g_ax_filt/g_ay_filt 绝不能在这里清零 —— 它们是输入调理
-             * 滤波器，必须连续运行。每拍清零会让估计器的加速度直流跟踪器
-             * (ax_lp) 锚定在 0.3 折的错误基线上，模式切换瞬间输入阶跃 →
-             * 跟踪器重收敛的 ~2s 内积出 ~0.5 m/s 假速度、漂移几十 cm
-             * （2026-07-04 标定模式开启瞬间实测复现，起飞推油门同理）。 */
+            /* flow_calib = 测试模式：本分支电机**始终停转**（上面 motor_stop
+             * 无条件执行 = 桨叶绝不转，结构性安全），但所有估计器继续运行，
+             * 免拆桨/免串口在地面验证：手持水平移动看 flow.x 标定 flow_scale，
+             * 手持竖直提放看 Vz（vz 估计器每拍推进不复位）。断连/超时复位
+             * setpoint 时 flow_calib 自动清零，恢复正常复位。解锁起飞走低油门
+             * 分支无条件复位，手持残留不会带入飞行。
+             * 注意：g_ax_filt/g_ay_filt 绝不能在这里清零 —— 输入调理滤波器
+             * 必须连续运行（2026-07-04 教训，见 flow_hold）。 */
             if (!sp->flow_calib) {
+                altitude_reset(&g_alt);
                 flow_hold_reset(&g_flow_hold);
                 grab_mission_clear_mark(&g_grab);   /* 坐标系复位, 投放点标记随之失效 */
+            } else {
+                /* 测试模式：vz 互补滤波照跑（不复位=不被清零），az_lp 直流
+                 * 跟踪器已在循环顶部每拍更新，flow 估计器 predict/update 也在
+                 * 上方 FLOW_ENABLED 段照常运行，此处只需推进 vz */
+                altitude_update_vz(&g_alt, tof_mm * 0.001f, az_up, dt);
             }
         } else {
             /* 安全：低油门时停转，防止地面角度环翘机 */

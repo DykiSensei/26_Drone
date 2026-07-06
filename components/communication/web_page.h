@@ -74,6 +74,7 @@
 "<div class=\"data-row\"><span>Distance</span><span id=\"tof-val\">-- mm</span></div>\n" \
 "<div class=\"data-row\"><span>Target</span><span id=\"alt-target\">0.00 m</span></div>\n" \
 "<div class=\"data-row\"><span>Vz</span><span id=\"alt-vz\">0.00 m/s</span></div>\n" \
+"<div class=\"data-row\"><span>Accel Z 零偏</span><span id=\"accel-zb\">-- m/s²</span></div>\n" \
 "</div>\n" \
 "<div class=\"panel\"><h3>Magnetometer (BN-880)</h3>\n" \
 "<div class=\"data-row\"><span>Mag X/Y/Z (G)</span><span id=\"mag-xyz\">--</span></div>\n" \
@@ -86,7 +87,7 @@
 "<div class=\"data-row\"><span>Vel vx/vy (m/s)</span><span id=\"flow-vel\">0.00 / 0.00</span></div>\n" \
 "<div class=\"data-row\"><span>Pos State</span><span id=\"flow-ps\">idle</span></div>\n" \
 "<div class=\"data-row\"><span>Pos Err X/Y (m)</span><span id=\"flow-perr\">-- / --</span></div>\n" \
-"<div class=\"data-row\"><span>标定模式 (锁定手持标定)</span><span><button id=\"fc-btn\" onclick=\"toggleFlowCalib()\">OFF</button></span></div>\n" \
+"<div class=\"data-row\"><span>测试模式 (估计器运行/桨停)</span><span><button id=\"fc-btn\" onclick=\"toggleFlowCalib()\">OFF</button></span></div>\n" \
 "</div>\n" \
 "</div>\n" \
 "<div class=\"controls\">\n" \
@@ -211,7 +212,7 @@
 "try{let d=JSON.parse(e.data);\n" \
 "if(d.attitude){$('att-roll').textContent=d.attitude.roll.toFixed(1)+'°';$('att-pitch').textContent=d.attitude.pitch.toFixed(1)+'°';$('att-yaw').textContent=d.attitude.yaw.toFixed(1)+'°'}\n" \
 "if(d.tof!=null){$('tof-val').textContent=d.tof+' mm'}\n" \
-"if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s'}\n" \
+"if(d.alt){$('alt-target').textContent=d.alt.target.toFixed(2)+' m';if(d.alt.vz!=null)$('alt-vz').textContent=d.alt.vz.toFixed(2)+' m/s';if(d.alt.azb!=null){var zb=$('accel-zb');zb.textContent=d.alt.azb.toFixed(3)+' m/s\\u00b2';zb.style.color=Math.abs(d.alt.azb)>0.3?'#d2991d':'#7ee787'}}\n" \
 "if(d.mag){if(d.mag.ok){$('mag-xyz').textContent=d.mag.x.toFixed(2)+' / '+d.mag.y.toFixed(2)+' / '+d.mag.z.toFixed(2);$('mag-hdg').textContent=d.mag.hdg.toFixed(0)+'\\u00b0'}else{$('mag-xyz').textContent='-- (未检测到)';$('mag-hdg').textContent='--'}}\n" \
 "if(d.flow){$('flow-x').textContent=d.flow.x.toFixed(2);$('flow-y').textContent=d.flow.y.toFixed(2);$('flow-qual').textContent=d.flow.qual;if(d.flow.qg!=null){var qge=$('flow-qg');qge.textContent=d.flow.qg.toFixed(2);qge.style.color=d.flow.qg>0.5?'#7ee787':(d.flow.qg>=0.05?'#d2991d':'#f85149')}if(d.flow.vx!=null)$('flow-vel').textContent=d.flow.vx.toFixed(2)+' / '+d.flow.vy.toFixed(2);if(d.flow.ps!=null){var psn=['idle','wait','lock','move'],pse=$('flow-ps');pse.textContent=psn[d.flow.ps]||'?';pse.style.color=d.flow.ps===2?'#7ee787':(d.flow.ps===1?'#d2991d':'#8b949e');if(d.flow.ps>=2){var ex=d.flow.tx-d.flow.x,ey=d.flow.ty-d.flow.y;$('flow-perr').textContent=ex.toFixed(2)+' / '+ey.toFixed(2)}else{$('flow-perr').textContent='-- / --'}}}\n" \
 "if(d.mode){$('mode-display').textContent=d.mode.toUpperCase();$('mode-display').className=d.mode==='disarmed'?'disarmed':'';mode=d.mode;let t={'disarmed':0,'stabilize':1,'alt_hold':2,'pos_hold':3};let btns=document.querySelectorAll('.mode-btn');for(let i=0;i<btns.length;i++)btns[i].classList.remove('active');let idx=t[d.mode];if(idx!=null)btns[idx].classList.add('active')}\n" \
@@ -237,7 +238,7 @@
 "function dropStart(r){if(!connected)return;if(confirm(r?'返航投放?\\n\\n先航位推算返航到标记投放点, 下降张爪投放, 然后回升。':'就地投放?\\n\\n在当前位置下降到投放高度张爪, 然后回升。')){ws.send(JSON.stringify({cmd:'drop_start',ret:r?1:0}));showToast(r?'返航投放启动':'就地投放启动',true)}}\n" \
 "var flowCalib=0;\n" \
 "function setFlowCalibUI(){var b=$('fc-btn');b.textContent=flowCalib?'ON':'OFF';b.style.background=flowCalib?'#238636':'';b.style.color=flowCalib?'#fff':''}\n" \
-"function toggleFlowCalib(){if(!connected)return;flowCalib=flowCalib?0:1;ws.send(JSON.stringify({cmd:'flow_calib',on:flowCalib}));setFlowCalibUI();showToast(flowCalib?'标定模式开启: 保持锁定, 手持移动飞机, 看 X(m)':'标定模式关闭',!flowCalib)}\n" \
+"function toggleFlowCalib(){if(!connected)return;flowCalib=flowCalib?0:1;ws.send(JSON.stringify({cmd:'flow_calib',on:flowCalib}));setFlowCalibUI();showToast(flowCalib?'测试模式开启(桨停): 手持水平移动看Flow X, 竖直提放看Vz':'测试模式关闭',!flowCalib)}\n" \
 "function calibMotor(idx){if(!connected)return;let names=['FR','FL','RL','RR'];if(confirm('校准 M'+(idx+1)+'('+names[idx]+')?\\n\\n1. 拆下该电机螺旋桨！\\n2. 断开电调电池\\n3. 点确定后等待提示')){ws.send(JSON.stringify({cmd:'calibrate_motor',motor_index:idx}));showToast('M'+(idx+1)+' 校准中... 按提示接通电池',true)}}\n" \
 "setInterval(sendStick,50);\n" \
 "/* Joysticks */\n" \

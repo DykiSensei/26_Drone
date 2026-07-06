@@ -187,7 +187,8 @@ MPU6050 → Mahony AHRS → 欧拉角 (roll/pitch/yaw)
 | All MAX/MIN 测电机没反应 | 电机测试仅在锁定模式生效 | 切回 DISARMED 再测（飞行模式下测试按钮被忽略） |
 | 校准按钮无反应 | 校准命令仅在锁定模式生效 | 切回 DISARMED 再校准 |
 | 定点悬停缓慢漂移 | flow_scale 未标定 | 固定高度移动 1m 对比遥测 X，按比例修正 FlowScale |
-| 起飞漂移大 / Pos State 一直 wait 不进 lock / 上升中 Vz 读负 | Vz 常值偏移卡死位置锁：accel-Z 零偏未校准 + 电机振动整流（2026-07-06 已修复） | 烧新固件后做一次陀螺仪校准，日志看 `accel Z bias`；悬停时 Vz 应围绕 0 波动、Pos State 进 lock。注意锁定态 Vz 恒显 0 是正常的（每拍复位） |
+| 起飞漂移大 / Pos State 一直 wait 不进 lock / 上升中 Vz 读负 | Vz 常值偏移卡死位置锁：accel-Z 零偏未校准 + 电机振动整流（2026-07-06 已修复） | 做一次陀螺仪校准，前端 TOF 面板看 **Accel Z 零偏**（免串口，>0.3 变黄）；开**测试模式**（桨停）竖直提放看 Vz 响应；真悬停时 Vz 应围绕 0、Pos State 进 lock。注意普通锁定态 Vz 恒显 0 是正常的（每拍复位），要看 Vz 必须开测试模式 |
+| 地面油门测试飞机滑走 / 光流欠报 | 爪腿把机腹撑高、飞机半悬蹭地并倾斜，不是有效测试；净位移≠肉眼峰值 | 别用电机+地面滑测位置保持。测 flow_scale 用**测试模式**（桨停）手持匀速移动已知距离对比 Flow X |
 | 切入 ALT_HOLD 立即跳高/掉高 | 切入瞬间高度估计错误 | 在 0.5–1m 高度切换；检查 TOF 读数 `tof` 是否合理（40–4000 mm） |
 | 飞机持续朝一个方向漂 | 水平校准未做或安装偏移大 | 重新执行 Gyro Calib + Level Trim |
 | 飞机起飞后旋转（自转） | 电机方向/螺旋桨错装 | 检查 CCW/CW 桨位 |
@@ -297,7 +298,7 @@ Flash 端口默认 `COM14`，ESP-IDF 路径见 `CLAUDE.md`。
 {"cmd": "calibrate_motor", "motor_index": 0}  // 单电机校准 (0=FR,1=FL,2=RL,3=RR)
 {"cmd": "takeoff", "height": 0.5, "base_throttle": 0.4}  // 自动起飞到指定高度
 {"cmd": "flow_comp", "kx": -1.0, "ky": -1.0, "scale": 0.00244}  // 光流标定：陀螺补偿方向系数(无量纲±1) + 米制换算系数(rad/count)
-{"cmd": "flow_calib", "on": 1}            // 光流标定模式：锁定下估计器不复位（电机停转），手持标定用；断连自动关闭
+{"cmd": "flow_calib", "on": 1}            // 测试模式：DISARMED 下所有估计器运行、电机停转（桨不转），手持水平移动标定 flow / 竖直提放看 Vz；断连自动关闭
 {"cmd": "grip", "angle": 45}              // 机械爪直接给角度 0-90（调试滑条）
 {"cmd": "grip", "action": "open"}         // 机械爪预设动作 open/close（任意模式可用）
 {"cmd": "grab_start", "test": 1}          // 启动抓取任务：test=1 无P4测试流程（跳过视觉对准）；test=0 正式流程需P4在线
